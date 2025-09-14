@@ -1,0 +1,52 @@
+# CUDA executables
+*.exe
+*.out
+basic_gemm
+gemm_relu
+gemm_relu_cutlass
+gemm_custom_epilogue
+test_example
+test_swizzle
+
+# Object files
+*.o
+*.obj
+*.cuo
+
+# CUDA intermediate files
+*.i
+*.ii
+*.gpu
+*.ptx
+*.cubin
+*.fatbin
+
+# Dependency files
+*.d
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Build directories
+build/
+bin/
+lib/
+
+# OS specific files
+.DS_Store
+Thumbs.db
+
+# Debug files
+*.pdb
+*.ilk
+
+# Profiling files
+*.nvprof
+*.nsys-rep
+*.ncu-rep
+*.qdrep
+*.sqlite
