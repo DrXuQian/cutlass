@@ -3,7 +3,6 @@
 #include <cuda_runtime.h>
 #include <cutlass/cutlass.h>
 #include <cutlass/gemm/device/gemm_splitk_parallel.h>
-#include <cutlass/util/host_tensor.h>
 
 #define CHECK_CUDA(call) do { \
     cudaError_t error = call; \
@@ -40,9 +39,7 @@ int main() {
             128 / cutlass::sizeof_bits<ElementC>::value,
             ElementAccumulator,
             ElementCompute
-        >,
-        cutlass::gemm::threadblock::GemmSplitKIdentityThreadblockSwizzle,
-        2
+        >
     >;
 
     // Allocate host matrices
