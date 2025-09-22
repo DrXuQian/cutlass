@@ -35,8 +35,8 @@ __global__ void b2b_gemm_shmem_kernel(
     // 线程块和线程索引
     const int bx = blockIdx.x;
     const int by = blockIdx.y;
-    const int tx = threadIdx.x;
-    const int ty = threadIdx.y;
+    const int tx = threadIdx.x;     // 线程在块内x方向的索引
+    const int ty = threadIdx.y;     // 线程在块内y方向的索引
 
     // 共享内存分配
     // 关键：使用共享内存存储中间结果C
@@ -146,8 +146,8 @@ __global__ void b2b_gemm_shmem_kernel_v2(
     half* __restrict__ D,          // [M, P] 行主序
     int M, int N, int K, int P
 ) {
-    const int tx = threadIdx.x;
-    const int ty = threadIdx.y;
+    const int tx = threadIdx.x;     // 线程在块内x方向的索引
+    const int ty = threadIdx.y;     // 线程在块内y方向的索引
 
     // 每个线程块处理输出D的一个TILE_SIZE x TILE_SIZE块
     const int block_row = blockIdx.y * TILE_SIZE;
