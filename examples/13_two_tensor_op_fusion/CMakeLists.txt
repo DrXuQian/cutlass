@@ -95,25 +95,18 @@ cutlass_example_add_executable(
 
 add_dependencies(13_fused_ffn_layer 13_fused_ffn_layer_example)
 
-# Add simplified B2B GEMM examples (CUTLASS-style)
+# Add standalone B2B GEMM examples (completely self-contained)
 cutlass_example_add_executable(
-  13_simplified_b2b_gemm_rf
-  simplified_b2b_gemm_rf.cu
+  13_standalone_b2b_gemm_rf
+  standalone_b2b_gemm_rf.cu
 )
 
 cutlass_example_add_executable(
-  13_simplified_b2b_gemm_shmem
-  simplified_b2b_gemm_shmem.cu
-)
-
-# Add working version of RF B2B GEMM
-cutlass_example_add_executable(
-  13_simplified_b2b_gemm_rf_working
-  simplified_b2b_gemm_rf_working.cu
+  13_standalone_b2b_gemm_shmem
+  standalone_b2b_gemm_shmem.cu
 )
 
 add_dependencies(13_simplified_b2b_gemm
-  13_simplified_b2b_gemm_rf
-  13_simplified_b2b_gemm_shmem
-  13_simplified_b2b_gemm_rf_working
+  13_standalone_b2b_gemm_rf
+  13_standalone_b2b_gemm_shmem
 )
