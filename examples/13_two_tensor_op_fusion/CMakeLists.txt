@@ -36,9 +36,12 @@ add_custom_target(13_fused_two_gemms)
 
 add_custom_target(13_fused_two_convs)
 
+add_custom_target(13_fused_ffn_layer)
+
 add_custom_target(13_two_tensor_op_fusion
 DEPENDS 13_fused_two_gemms
         13_fused_two_convs
+        13_fused_ffn_layer
 )
 
 foreach(FUSION_CONV_EXAMPLE
@@ -80,3 +83,11 @@ foreach(FUSION_GEMM_EXAMPLE
   add_dependencies(13_fused_two_gemms 13_${FUSION_GEMM_EXAMPLE})
 
 endforeach()
+
+# Add FFN fusion example
+cutlass_example_add_executable(
+  13_fused_ffn_layer_example
+  fused_ffn_layer.cu
+)
+
+add_dependencies(13_fused_ffn_layer 13_fused_ffn_layer_example)
