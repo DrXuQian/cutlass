@@ -28,43 +28,47 @@
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  *
  **************************************************************************************************/
-#include <iostream>
+#include <iostream>  // C++标准输入输出流
 
-#include "cutlass/cutlass.h"
-#include "cutlass/gemm/device/gemm.h"
+#include "cutlass/cutlass.h"                               // CUTLASS核心头文件
+#include "cutlass/gemm/device/gemm.h"                      // CUTLASS设备端GEMM操作
 
-#include "cutlass/util/host_tensor.h"
-#include "cutlass/util/tensor_view_io.h"
-#include "cutlass/util/reference/host/tensor_fill.h"
-#include "cutlass/util/reference/host/tensor_copy.h"
-#include "cutlass/util/reference/host/tensor_compare.h"
-#include "cutlass/util/reference/host/gemm.h"
+#include "cutlass/util/host_tensor.h"                      // 主机端张量容器
+#include "cutlass/util/tensor_view_io.h"                   // 张量视图I/O工具
+#include "cutlass/util/reference/host/tensor_fill.h"       // 张量填充工具
+#include "cutlass/util/reference/host/tensor_copy.h"       // 张量复制工具
+#include "cutlass/util/reference/host/tensor_compare.h"    // 张量比较工具
+#include "cutlass/util/reference/host/gemm.h"              // 参考实现的GEMM
 
-#include "device/b2b_gemm.h"
-#include "b2b_gemm_run.h"
-#include "test_run.h"
+#include "device/b2b_gemm.h"                               // B2B（back-to-back）GEMM设备端实现
+#include "b2b_gemm_run.h"                                  // B2B GEMM运行辅助函数
+#include "test_run.h"                                      // 测试运行辅助函数
 
 ////////////////////////////////////////////////////////////////////////////////
 
-cutlass::gemm::GemmCoord gemm_f16_sm80_problem_size_0(128*640, 64, 576);
+// 定义两个GEMM操作的问题规模（共享内存版本）
+// 第一个GEMM: [M=81920, N=64, K=576]
+cutlass::gemm::GemmCoord gemm_f16_sm80_problem_size_0(128*640, 64, 576);  // M = 128*640 = 81920
+// 第二个GEMM: [M=81920, N=256, K=64] - 注意N维度更大（256 vs 128）
 cutlass::gemm::GemmCoord gemm_f16_sm80_problem_size_1(128*640, 256, 64);
 
-bool run_nonfused_gemm_f16_sm80() {
+bool run_nonfused_gemm_f16_sm80() {  // 运行非融合的FP16 GEMM（基准版本）
 
-  using ElementOutput = cutlass::half_t;
-  using ElementAccumulator = cutlass::half_t;
-  using ElementCompute = cutlass::half_t;
+  using ElementOutput = cutlass::half_t;       // 输出元素类型：半精度浮点数
+  using ElementAccumulator = cutlass::half_t;  // 累加器元素类型：半精度浮点数
+  using ElementCompute = cutlass::half_t;      // 计算元素类型：半精度浮点数
 
   ElementCompute alpha0 = ElementCompute(1);
   ElementCompute beta0 = ElementCompute(1); //beta=1 for bias
   ElementCompute alpha1 = ElementCompute(1);
   ElementCompute beta1 = ElementCompute(1); //beta=1 for bias
 
-  using ThreadblockShape0 = cutlass::gemm::GemmShape<64, 64, 32>;
-  using WarpShape0 = cutlass::gemm::GemmShape<32, 32, 32>;
-  using ThreadblockShape1 = cutlass::gemm::GemmShape<64, 256, 32>;
-  using WarpShape1 = cutlass::gemm::GemmShape<64, 64, 32>;
-  using InstructionShape = cutlass::gemm::GemmShape<16, 8, 16>;
+  // 定义线程块形状和warp形状
+  using ThreadblockShape0 = cutlass::gemm::GemmShape<64, 64, 32>;   // 第一个GEMM线程块：64x64x32
+  using WarpShape0 = cutlass::gemm::GemmShape<32, 32, 32>;          // 第一个GEMM Warp：32x32x32
+  using ThreadblockShape1 = cutlass::gemm::GemmShape<64, 256, 32>;  // 第二个GEMM线程块：64x256x32
+  using WarpShape1 = cutlass::gemm::GemmShape<64, 64, 32>;          // 第二个GEMM Warp：64x64x32
+  using InstructionShape = cutlass::gemm::GemmShape<16, 8, 16>;     // Tensor Core MMA指令形状
 
   using Gemm0 = cutlass::gemm::device::Gemm<
     cutlass::half_t,
@@ -125,11 +129,11 @@ bool run_nonfused_gemm_f16_sm80() {
   return pass;
 }
 
-bool run_fused_gemm_f16_sm80_shmem() {
+bool run_fused_gemm_f16_sm80_shmem() {  // 运行融合的FP16 GEMM（共享内存版本）
 
-  using ElementOutput = cutlass::half_t;
-  using ElementAccumulator = cutlass::half_t;
-  using ElementCompute = cutlass::half_t;
+  using ElementOutput = cutlass::half_t;       // 输出元素类型：半精度浮点数
+  using ElementAccumulator = cutlass::half_t;  // 累加器元素类型：半精度浮点数
+  using ElementCompute = cutlass::half_t;      // 计算元素类型：半精度浮点数
 
   ElementCompute alpha0 = ElementCompute(1);
   //Fused kernel has built-in bias, setting beta=0
@@ -137,17 +141,19 @@ bool run_fused_gemm_f16_sm80_shmem() {
   ElementCompute alpha1 = ElementCompute(1);
   ElementCompute beta1 = ElementCompute(1); //beta=1 for bias
 
-  using ThreadblockShape0 = cutlass::gemm::GemmShape<64, 64, 32>;
-  using WarpShape0 = cutlass::gemm::GemmShape<32, 32, 32>;
-  using ThreadblockShape1 = cutlass::gemm::GemmShape<64, 256, 32>;
-  using WarpShape1 = cutlass::gemm::GemmShape<64, 64, 32>;
-  using InstructionShape = cutlass::gemm::GemmShape<16, 8, 16>;
+  // 定义线程块形状和warp形状
+  using ThreadblockShape0 = cutlass::gemm::GemmShape<64, 64, 32>;   // 第一个GEMM线程块：64x64x32
+  using WarpShape0 = cutlass::gemm::GemmShape<32, 32, 32>;          // 第一个GEMM Warp：32x32x32
+  using ThreadblockShape1 = cutlass::gemm::GemmShape<64, 256, 32>;  // 第二个GEMM线程块：64x256x32
+  using WarpShape1 = cutlass::gemm::GemmShape<64, 64, 32>;          // 第二个GEMM Warp：64x64x32
+  using InstructionShape = cutlass::gemm::GemmShape<16, 8, 16>;     // Tensor Core MMA指令形状
 
-  using EpilogueOutputOp0 = 
+  // 第一个GEMM的epilogue操作（输出处理）
+  using EpilogueOutputOp0 =
     cutlass::epilogue::thread::LinearCombinationRelu<
-      ElementOutput,
-      InstructionShape::kM * InstructionShape::kN / 32,
-      ElementAccumulator,
+      ElementOutput,                                      // 输出元素类型
+      InstructionShape::kM * InstructionShape::kN / 32,   // 向量化存储宽度（基于指令形状计算）
+      ElementAccumulator,                                 // 累加器类型
       ElementCompute,
       cutlass::epilogue::thread::ScaleType::OnlyAlphaScaling
     >;
