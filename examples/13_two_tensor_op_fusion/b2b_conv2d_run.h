@@ -31,73 +31,77 @@
 
 #pragma once
 
-#include <iostream>
-#include <fstream>
-#include <sstream>
+#include <iostream>                                       // C++标准输入输出流
+#include <fstream>                                        // 文件流
+#include <sstream>                                        // 字符串流
 
-#include "cutlass/cutlass.h"
+#include "cutlass/cutlass.h"                            // CUTLASS核心头文件
 
-#include "cutlass/conv/device/implicit_gemm_convolution.h"
-#include "cutlass/reduction/device/reduce_split_k.h"
-#include "cutlass/reduction/thread/reduction_operators.h"
+#include "cutlass/conv/device/implicit_gemm_convolution.h"  // 隐式GEMM卷积设备端实现
+#include "cutlass/reduction/device/reduce_split_k.h"    // Split-K归约设备端实现
+#include "cutlass/reduction/thread/reduction_operators.h"  // 线程级归约操作符
 
-#include "cutlass/util/host_tensor.h"
-#include "cutlass/util/reference/host/tensor_fill.h"
-#include "cutlass/util/reference/device/tensor_compare.h"
-#include "cutlass/util/reference/host/tensor_compare.h"
-#include "cutlass/util/reference/host/tensor_norm.h"
+#include "cutlass/util/host_tensor.h"                    // 主机端张量容器
+#include "cutlass/util/reference/host/tensor_fill.h"     // 张量填充工具
+#include "cutlass/util/reference/device/tensor_compare.h" // 设备端张量比较
+#include "cutlass/util/reference/host/tensor_compare.h"  // 主机端张量比较
+#include "cutlass/util/reference/host/tensor_norm.h"     // 张量范数计算
 
-#include "cutlass/util/reference/host/convolution.h"
-#include "cutlass/util/reference/device/convolution.h"
-#include "cutlass/util/reference/device/tensor_relu.h"
+#include "cutlass/util/reference/host/convolution.h"     // 主机端卷积参考实现
+#include "cutlass/util/reference/device/convolution.h"   // 设备端卷积参考实现
+#include "cutlass/util/reference/device/tensor_relu.h"   // 设备端ReLU激活
 
-#include "cutlass/core_io.h"
-#include "cutlass/util/tensor_view_io.h"
+#include "cutlass/core_io.h"                            // 核心I/O功能
+#include "cutlass/util/tensor_view_io.h"                // 张量视图I/O
 
-#include "reference/device/tensor_scale_bias.h"
-#include "helper.h"
+#include "reference/device/tensor_scale_bias.h"         // 张量缩放和偏置
+#include "helper.h"                                      // 辅助函数
 
-#define CHECK_GT(val1, val2) \
-    if((val1) <= (val2)) \
-        std::cerr << __FILE__ << " " << __LINE__ << ": CHECK_GT failed\n";
-#define CHECK_TRUE(val) \
-    if(!(val)) \
-        std::cerr << __FILE__ << " " << __LINE__ << ": CHECK_TRUE failed\n";
+// 检查宏定义
+#define CHECK_GT(val1, val2) \                          // 检查val1是否大于val2
+    if((val1) <= (val2)) \                              // 如果不满足条件
+        std::cerr << __FILE__ << " " << __LINE__ << ": CHECK_GT failed\n";  // 输出错误信息
+#define CHECK_TRUE(val) \                               // 检查布尔值是否为真
+    if(!(val)) \                                        // 如果为假
+        std::cerr << __FILE__ << " " << __LINE__ << ": CHECK_TRUE failed\n"; // 输出错误信息
 
 
-template <typename Conv2d0_, typename Conv2d1_>
-class B2bNonFusedConv2dRun {
+// 非融合的背靠背（B2B）2D卷积运行器模板类
+template <typename Conv2d0_, typename Conv2d1_>          // 两个卷积操作的模板参数
+class B2bNonFusedConv2dRun {                            // B2B非融合卷积运行器类
 public:
 
-  using Conv2d0 = Conv2d0_;
-  using Conv2d1 = Conv2d1_;
-  using ElementAccumulator = typename Conv2d0::ElementAccumulator;
-  using ElementCompute = typename Conv2d0::ElementCompute;
+  using Conv2d0 = Conv2d0_;                              // 第一个卷积操作类型
+  using Conv2d1 = Conv2d1_;                              // 第二个卷积操作类型
+  using ElementAccumulator = typename Conv2d0::ElementAccumulator;  // 累加器元素类型
+  using ElementCompute = typename Conv2d0::ElementCompute;  // 计算元素类型
 
-  static cutlass::conv::Operator const kConvolutionalOperator = Conv2d0::kConvolutionalOperator;
-  static_assert(kConvolutionalOperator == Conv2d1::kConvolutionalOperator, 
-        "Fused convolution operators must be the same");
+  static cutlass::conv::Operator const kConvolutionalOperator = Conv2d0::kConvolutionalOperator;  // 卷积操作符类型
+  static_assert(kConvolutionalOperator == Conv2d1::kConvolutionalOperator,   // 静态断言：两个卷积必须使用相同的操作符
+        "Fused convolution operators must be the same");  // 错误信息：融合卷积操作符必须相同
 
 public:
 
-  /// Initialization
-  cutlass::Distribution::Kind init_A;
-  cutlass::Distribution::Kind init_B;
-  cutlass::Distribution::Kind init_C;
-  cutlass::Distribution::Kind init_Bias;
-  uint64_t seed;
+  /// Initialization  // 初始化参数
+  cutlass::Distribution::Kind init_A;                    // 输入张量A的初始化分布类型
+  cutlass::Distribution::Kind init_B;                    // 滤波器张量B的初始化分布类型
+  cutlass::Distribution::Kind init_C;                    // 输入张量C的初始化分布类型
+  cutlass::Distribution::Kind init_Bias;                 // 偏置的初始化分布类型
+  uint64_t seed;                                         // 随机数种子
 
-  cutlass::HostTensor<typename Conv2d0::ElementA, typename Conv2d0::LayoutA> tensor_A0;
-  cutlass::HostTensor<typename Conv2d0::ElementB, typename Conv2d0::LayoutB> tensor_B0;
-  cutlass::HostTensor<typename Conv2d0::ElementC, typename Conv2d0::LayoutC> tensor_C0;
-  cutlass::HostTensor<typename Conv2d0::ElementCompute, typename Conv2d0::LayoutC> tensor_Bias0;
-  cutlass::HostTensor<typename Conv2d0::ElementC, typename Conv2d0::LayoutC> tensor_D0_computed;
-  cutlass::HostTensor<typename Conv2d0::ElementC, typename Conv2d0::LayoutC> tensor_D0_reference;
+  // 第一个卷积的张量
+  cutlass::HostTensor<typename Conv2d0::ElementA, typename Conv2d0::LayoutA> tensor_A0;            // 输入特征图
+  cutlass::HostTensor<typename Conv2d0::ElementB, typename Conv2d0::LayoutB> tensor_B0;            // 卷积核（滤波器）
+  cutlass::HostTensor<typename Conv2d0::ElementC, typename Conv2d0::LayoutC> tensor_C0;            // 输入偏置或残差
+  cutlass::HostTensor<typename Conv2d0::ElementCompute, typename Conv2d0::LayoutC> tensor_Bias0;   // 偏置向量
+  cutlass::HostTensor<typename Conv2d0::ElementC, typename Conv2d0::LayoutC> tensor_D0_computed;   // 计算得到的输出
+  cutlass::HostTensor<typename Conv2d0::ElementC, typename Conv2d0::LayoutC> tensor_D0_reference;  // 参考输出
 
-  cutlass::HostTensor<typename Conv2d1::ElementB, typename Conv2d1::LayoutB> tensor_B1;
-  cutlass::HostTensor<typename Conv2d1::ElementC, typename Conv2d1::LayoutC> tensor_C1;
-  cutlass::HostTensor<typename Conv2d1::ElementCompute, typename Conv2d0::LayoutC> tensor_Bias1;
-  cutlass::HostTensor<typename Conv2d1::ElementC, typename Conv2d1::LayoutC> tensor_D1_computed;
+  // 第二个卷积的张量
+  cutlass::HostTensor<typename Conv2d1::ElementB, typename Conv2d1::LayoutB> tensor_B1;            // 第二个卷积核
+  cutlass::HostTensor<typename Conv2d1::ElementC, typename Conv2d1::LayoutC> tensor_C1;            // 第二个输入偏置或残差
+  cutlass::HostTensor<typename Conv2d1::ElementCompute, typename Conv2d0::LayoutC> tensor_Bias1;   // 第二个偏置向量
+  cutlass::HostTensor<typename Conv2d1::ElementC, typename Conv2d1::LayoutC> tensor_D1_computed;   // 第二个卷积的计算输出
   cutlass::HostTensor<typename Conv2d1::ElementC, typename Conv2d1::LayoutC> tensor_D1_reference;
 
 

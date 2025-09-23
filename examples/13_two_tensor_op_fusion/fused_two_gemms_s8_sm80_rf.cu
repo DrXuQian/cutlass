@@ -28,70 +28,74 @@
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  *
  **************************************************************************************************/
-#include <iostream>
+#include <iostream>  // C++标准输入输出流
 
-#include "cutlass/cutlass.h"
-#include "cutlass/gemm/device/gemm.h"
+#include "cutlass/cutlass.h"                               // CUTLASS核心头文件
+#include "cutlass/gemm/device/gemm.h"                      // 设备端GEMM操作
 
-#include "cutlass/util/host_tensor.h"
-#include "cutlass/util/tensor_view_io.h"
-#include "cutlass/util/reference/host/tensor_fill.h"
-#include "cutlass/util/reference/host/tensor_copy.h"
-#include "cutlass/util/reference/host/tensor_compare.h"
-#include "cutlass/util/reference/host/gemm.h"
+#include "cutlass/util/host_tensor.h"                      // 主机端张量容器
+#include "cutlass/util/tensor_view_io.h"                   // 张量视图I/O
+#include "cutlass/util/reference/host/tensor_fill.h"       // 张量填充工具
+#include "cutlass/util/reference/host/tensor_copy.h"       // 张量复制工具
+#include "cutlass/util/reference/host/tensor_compare.h"    // 张量比较工具
+#include "cutlass/util/reference/host/gemm.h"              // 参考GEMM实现
 
-#include "device/b2b_gemm.h"
-#include "b2b_interleaved_gemm_run.h"
-#include "test_run.h"
+#include "device/b2b_gemm.h"                               // B2B GEMM设备端实现
+#include "b2b_interleaved_gemm_run.h"                      // B2B交错GEMM运行器
+#include "test_run.h"                                      // 测试运行辅助函数
 
 ////////////////////////////////////////////////////////////////////////////////
 
-cutlass::gemm::GemmCoord gemm_s8_sm80_problem_size_0(128*640, 64, 576);
-cutlass::gemm::GemmCoord gemm_s8_sm80_problem_size_1(128*640, 128, 64);
+// 定义两个INT8 GEMM的问题规模（SM80架构）
+cutlass::gemm::GemmCoord gemm_s8_sm80_problem_size_0(128*640, 64, 576);  // 第一个GEMM: [81920, 64, 576]
+cutlass::gemm::GemmCoord gemm_s8_sm80_problem_size_1(128*640, 128, 64); // 第二个GEMM: [81920, 128, 64]
 
+// 运行非融合的INT8 GEMM（SM80架构）
 bool run_nonfused_gemm_s8_sm80() {
 
-  using ElementOutput = int8_t;
-  using ElementAccumulator = int32_t;
-  using ElementCompute = float;
+  using ElementOutput = int8_t;        // 输出元素类型：8位有符号整数
+  using ElementAccumulator = int32_t;  // 累加器元素类型：32位整数（避免溢出）
+  using ElementCompute = float;        // 计算元素类型：单精度浮点数
 
-  ElementCompute alpha0 = ElementCompute(1);
-  ElementCompute beta0 = ElementCompute(1); //beta=1 for bias
-  ElementCompute alpha1 = ElementCompute(1);
-  ElementCompute beta1 = ElementCompute(1); //beta=1 for bias
+  ElementCompute alpha0 = ElementCompute(1);  // 第一个GEMM的alpha系数
+  ElementCompute beta0 = ElementCompute(1);   //beta=1 for bias  // beta=1用于偏置加法
+  ElementCompute alpha1 = ElementCompute(1);  // 第二个GEMM的alpha系数
+  ElementCompute beta1 = ElementCompute(1);   //beta=1 for bias  // beta=1用于偏置加法
 
-  using ThreadblockShape0 = cutlass::gemm::GemmShape<128, 64, 64>;
-  using WarpShape0 = cutlass::gemm::GemmShape<64, 64, 64>;
-  using ThreadblockShape1 = cutlass::gemm::GemmShape<128, 128, 64>;
-  using WarpShape1 = cutlass::gemm::GemmShape<64, 64, 64>;
-  using InstructionShape = cutlass::gemm::GemmShape<16, 8, 32>;
+  // 定义线程块和Warp形状（适用于INT8计算）
+  using ThreadblockShape0 = cutlass::gemm::GemmShape<128, 64, 64>;   // 第一个GEMM线程块：128x64x64
+  using WarpShape0 = cutlass::gemm::GemmShape<64, 64, 64>;           // 第一个GEMM Warp：64x64x64
+  using ThreadblockShape1 = cutlass::gemm::GemmShape<128, 128, 64>;  // 第二个GEMM线程块：128x128x64
+  using WarpShape1 = cutlass::gemm::GemmShape<64, 64, 64>;           // 第二个GEMM Warp：64x64x64
+  using InstructionShape = cutlass::gemm::GemmShape<16, 8, 32>;      // INT8 Tensor Core指令形状：16x8x32
 
+  // 定义第一个INT8 GEMM操作
   using Gemm0 = cutlass::gemm::device::Gemm<
-    int8_t,
-    cutlass::layout::ColumnMajorInterleaved<32>,
-    int8_t,
-    cutlass::layout::RowMajorInterleaved<32>,
-    ElementOutput,
-    cutlass::layout::ColumnMajorInterleaved<32>,
-    ElementAccumulator,
-    cutlass::arch::OpClassTensorOp,
-    cutlass::arch::Sm80,
-    ThreadblockShape0,
-    WarpShape0,
-    InstructionShape,
-    cutlass::epilogue::thread::LinearCombinationRelu<
-      ElementOutput,
-      64 / cutlass::sizeof_bits<ElementOutput>::value,
-      ElementAccumulator,
-      ElementCompute,
-      cutlass::epilogue::thread::ScaleType::NoBetaScaling
+    int8_t,                                           // A矩阵元素类型：INT8
+    cutlass::layout::ColumnMajorInterleaved<32>,     // A矩阵布局：列主序交错（32元素交错）
+    int8_t,                                           // B矩阵元素类型：INT8
+    cutlass::layout::RowMajorInterleaved<32>,        // B矩阵布局：行主序交错（32元素交错）
+    ElementOutput,                                    // C/D矩阵元素类型
+    cutlass::layout::ColumnMajorInterleaved<32>,     // C/D矩阵布局：列主序交错
+    ElementAccumulator,                               // 累加器类型：INT32
+    cutlass::arch::OpClassTensorOp,                  // 使用Tensor Core
+    cutlass::arch::Sm80,                             // 目标架构：SM80
+    ThreadblockShape0,                               // 线程块形状
+    WarpShape0,                                      // Warp形状
+    InstructionShape,                                // 指令形状
+    cutlass::epilogue::thread::LinearCombinationRelu<  // Epilogue操作：线性组合+ReLU
+      ElementOutput,                                 // 输出元素类型
+      64 / cutlass::sizeof_bits<ElementOutput>::value,  // 向量化宽度
+      ElementAccumulator,                            // 累加器类型
+      ElementCompute,                               // 计算类型
+      cutlass::epilogue::thread::ScaleType::NoBetaScaling  // 不进行beta缩放
     >,
-    cutlass::gemm::threadblock::GemmIdentityThreadblockSwizzle<>,
-    3,
-    16,
-    16,
-    false,
-    cutlass::arch::OpMultiplyAddSaturate
+    cutlass::gemm::threadblock::GemmIdentityThreadblockSwizzle<>,  // 线程块调度策略
+    3,                                               // 流水线阶段数
+    16,                                              // A矩阵对齐要求
+    16,                                              // B矩阵对齐要求
+    false,                                           // 不使用split-K
+    cutlass::arch::OpMultiplyAddSaturate            // 使用饱和乘加操作
   >;
   using Gemm1 = cutlass::gemm::device::Gemm<
     int8_t,

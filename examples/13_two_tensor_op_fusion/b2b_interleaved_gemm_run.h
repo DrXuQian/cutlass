@@ -30,58 +30,62 @@
  **************************************************************************************************/
 #pragma once
 
-#include <iostream>
-#include <fstream>
-#include <sstream>
+#include <iostream>      // C++标准输入输出流
+#include <fstream>       // 文件流操作
+#include <sstream>       // 字符串流操作
 
-#include "cutlass/util/host_tensor.h"
-#include "cutlass/util/tensor_view_io.h"
-#include "cutlass/util/distribution.h"
-#include "cutlass/util/reference/host/tensor_fill.h"
-#include "cutlass/util/reference/host/tensor_copy.h"
-#include "cutlass/util/reference/host/tensor_compare.h"
-#include "cutlass/util/reference/host/tensor_norm.h"
-#include "cutlass/util/host_reorder.h"
-#include "cutlass/util/reference/device/gemm.h"
-#include "cutlass/util/reference/device/gemm_complex.h"
-#include "cutlass/util/reference/device/tensor_relu.h"
+#include "cutlass/util/host_tensor.h"                      // 主机端张量容器
+#include "cutlass/util/tensor_view_io.h"                   // 张量视图I/O
+#include "cutlass/util/distribution.h"                     // 数据分布类型
+#include "cutlass/util/reference/host/tensor_fill.h"       // 张量填充工具
+#include "cutlass/util/reference/host/tensor_copy.h"       // 张量复制工具
+#include "cutlass/util/reference/host/tensor_compare.h"    // 张量比较工具
+#include "cutlass/util/reference/host/tensor_norm.h"       // 张量范数计算
+#include "cutlass/util/host_reorder.h"                     // 主机端数据重排
+#include "cutlass/util/reference/device/gemm.h"            // 设备端GEMM参考实现
+#include "cutlass/util/reference/device/gemm_complex.h"    // 复数GEMM参考实现
+#include "cutlass/util/reference/device/tensor_relu.h"     // ReLU激活函数
 
-#include "reference/device/tensor_scale_bias.h"
-#include "helper.h"
+#include "reference/device/tensor_scale_bias.h"            // 张量缩放和偏置
+#include "helper.h"                                        // 辅助函数
 
+// 检查val1是否大于val2的宏定义
 #define CHECK_GT(val1, val2) \
     if((val1) <= (val2)) \
         std::cerr << __FILE__ << " " << __LINE__ << ": CHECK_GT failed\n";
+// 检查条件是否为真的宏定义
 #define CHECK_TRUE(val) \
     if(!(val)) \
         std::cerr << __FILE__ << " " << __LINE__ << ": CHECK_TRUE failed\n";
 
-template <typename Gemm0_, typename Gemm1_, int InterleavedK_>
+// B2B交错布局非融合GEMM运行器模板
+template <typename Gemm0_, typename Gemm1_, int InterleavedK_>  // InterleavedK_: 交错大小
 struct B2bInterleavedNonFusedGemmRun
 {
 
-  using Gemm0 = Gemm0_;
-  using Gemm1 = Gemm1_;
-  using ElementAccumulator = typename Gemm0::ElementAccumulator;
-  using ElementCompute = typename Gemm0::GemmKernel::Epilogue::OutputOp::ElementCompute;
+  using Gemm0 = Gemm0_;                                              // 第一个GEMM操作类型
+  using Gemm1 = Gemm1_;                                              // 第二个GEMM操作类型
+  using ElementAccumulator = typename Gemm0::ElementAccumulator;    // 累加器元素类型
+  using ElementCompute = typename Gemm0::GemmKernel::Epilogue::OutputOp::ElementCompute;  // 计算元素类型
 
-  /// Initialization
-  cutlass::Distribution::Kind init_A;
-  cutlass::Distribution::Kind init_B;
-  cutlass::Distribution::Kind init_C;
-  cutlass::Distribution::Kind init_Bias;
-  uint64_t seed;
+  /// Initialization  // 初始化参数
+  cutlass::Distribution::Kind init_A;      // A矩阵的初始化分布类型
+  cutlass::Distribution::Kind init_B;      // B矩阵的初始化分布类型
+  cutlass::Distribution::Kind init_C;      // C矩阵的初始化分布类型
+  cutlass::Distribution::Kind init_Bias;   // 偏置的初始化分布类型
+  uint64_t seed;                            // 随机数种子
 
   //
   // Methods
   //
 
+  // 构造函数，设置默认的初始化分布为均匀分布
   B2bInterleavedNonFusedGemmRun(
-    cutlass::Distribution::Kind init_A_ = cutlass::Distribution::Uniform,
-    cutlass::Distribution::Kind init_B_ = cutlass::Distribution::Uniform,
-    cutlass::Distribution::Kind init_C_ = cutlass::Distribution::Uniform,
-    cutlass::Distribution::Kind init_Bias_ = cutlass::Distribution::Uniform,
-    uint64_t seed_ = 2080
+    cutlass::Distribution::Kind init_A_ = cutlass::Distribution::Uniform,      // A矩阵默认均匀分布
+    cutlass::Distribution::Kind init_B_ = cutlass::Distribution::Uniform,      // B矩阵默认均匀分布
+    cutlass::Distribution::Kind init_C_ = cutlass::Distribution::Uniform,      // C矩阵默认均匀分布
+    cutlass::Distribution::Kind init_Bias_ = cutlass::Distribution::Uniform,   // 偏置默认均匀分布
+    uint64_t seed_ = 2080                                                      // 默认随机种子
   ):
     init_A(init_A_), init_B(init_B_), init_C(init_C_), init_Bias(init_Bias_), seed(seed_) { }
 
@@ -195,135 +199,152 @@ struct B2bInterleavedNonFusedGemmRun
       typename Gemm1::ElementC,
       typename Gemm1::LayoutC> reference_D1(problem_size_1.mn());
 
-    CHECK_TRUE(initialize_tensor(tensor_A0.host_view(), init_A, seed + 2019));
-    CHECK_TRUE(initialize_tensor(tensor_B0.host_view(), init_B, seed + 2018));
-    CHECK_TRUE(initialize_tensor(tensor_C0.host_view(), init_C, seed + 2017));
-    CHECK_TRUE(initialize_tensor(tensor_Bias0.host_view(), init_Bias, seed + 2014));
-    CHECK_TRUE(initialize_tensor(tensor_B1.host_view(), init_B, seed + 2016));
-    CHECK_TRUE(initialize_tensor(tensor_C1.host_view(), init_C, seed + 2015));
-    CHECK_TRUE(initialize_tensor(tensor_Bias1.host_view(), init_Bias, seed + 2013));
+    // 初始化所有张量的数据（使用不同的随机种子确保数据唯一性）
+    CHECK_TRUE(initialize_tensor(tensor_A0.host_view(), init_A, seed + 2019));      // 初始化第一个GEMM的A矩阵
+    CHECK_TRUE(initialize_tensor(tensor_B0.host_view(), init_B, seed + 2018));      // 初始化第一个GEMM的B矩阵
+    CHECK_TRUE(initialize_tensor(tensor_C0.host_view(), init_C, seed + 2017));      // 初始化第一个GEMM的C矩阵
+    CHECK_TRUE(initialize_tensor(tensor_Bias0.host_view(), init_Bias, seed + 2014)); // 初始化第一个GEMM的偏置
+    CHECK_TRUE(initialize_tensor(tensor_B1.host_view(), init_B, seed + 2016));      // 初始化第二个GEMM的B矩阵
+    CHECK_TRUE(initialize_tensor(tensor_C1.host_view(), init_C, seed + 2015));      // 初始化第二个GEMM的C矩阵
+    CHECK_TRUE(initialize_tensor(tensor_Bias1.host_view(), init_Bias, seed + 2013)); // 初始化第二个GEMM的偏置
 
-    //Reorder B0 and B1
-    cutlass::reorder_column<InterleavedK_>(
-        tensor_B0_reordered.host_ref(), tensor_B0.host_ref(), problem_size_0);
-    cutlass::reorder_column<InterleavedK_>(
-        tensor_B1_reordered.host_ref(), tensor_B1.host_ref(), problem_size_1);
+    // 对B0和B1矩阵进行重排序以适应交错布局
+    // Reorder B0 and B1
+    cutlass::reorder_column<InterleavedK_>(                                         // 使用InterleavedK参数重排列
+        tensor_B0_reordered.host_ref(), tensor_B0.host_ref(), problem_size_0);      // 重排序第一个GEMM的B矩阵
+    cutlass::reorder_column<InterleavedK_>(                                         // 使用相同的交错参数
+        tensor_B1_reordered.host_ref(), tensor_B1.host_ref(), problem_size_1);      // 重排序第二个GEMM的B矩阵
 
-    cutlass::reference::host::TensorFill(
-      tensor_D0.host_view());
-    cutlass::reference::host::TensorFill(
-      tensor_D1.host_view());
-    cutlass::reference::host::TensorFill(
-      reference_D0.host_view());
-    cutlass::reference::host::TensorFill(
-      reference_D1.host_view());
+    // 填充输出张量（初始化为默认值）
+    cutlass::reference::host::TensorFill(                                           // 使用TensorFill初始化
+      tensor_D0.host_view());                                                       // 第一个GEMM的输出张量
+    cutlass::reference::host::TensorFill(                                           // 使用TensorFill初始化
+      tensor_D1.host_view());                                                       // 第二个GEMM的输出张量
+    cutlass::reference::host::TensorFill(                                           // 使用TensorFill初始化
+      reference_D0.host_view());                                                    // 第一个GEMM的参考输出
+    cutlass::reference::host::TensorFill(                                           // 使用TensorFill初始化
+      reference_D1.host_view());                                                    // 第二个GEMM的参考输出
 
-    tensor_A0.sync_device();
-    tensor_B0.sync_device();
-    tensor_B0_reordered.sync_device();
-    tensor_C0.sync_device();
-    tensor_Bias0.sync_device();
-    tensor_D0.sync_device();
-    tensor_B1.sync_device();
-    tensor_B1_reordered.sync_device();
-    tensor_C1.sync_device();
-    tensor_Bias1.sync_device();
-    tensor_D1.sync_device();
-    reference_D0.sync_device();
-    reference_D1.sync_device();
+    // 将所有张量从主机内存同步到设备内存
+    tensor_A0.sync_device();           // 同步第一个GEMM的A矩阵到GPU
+    tensor_B0.sync_device();           // 同步第一个GEMM的原始B矩阵到GPU
+    tensor_B0_reordered.sync_device(); // 同步第一个GEMM的重排序B矩阵到GPU
+    tensor_C0.sync_device();           // 同步第一个GEMM的C矩阵到GPU
+    tensor_Bias0.sync_device();        // 同步第一个GEMM的偏置到GPU
+    tensor_D0.sync_device();           // 同步第一个GEMM的输出到GPU
+    tensor_B1.sync_device();           // 同步第二个GEMM的原始B矩阵到GPU
+    tensor_B1_reordered.sync_device(); // 同步第二个GEMM的重排序B矩阵到GPU
+    tensor_C1.sync_device();           // 同步第二个GEMM的C矩阵到GPU
+    tensor_Bias1.sync_device();        // 同步第二个GEMM的偏置到GPU
+    tensor_D1.sync_device();           // 同步第二个GEMM的输出到GPU
+    reference_D0.sync_device();        // 同步参考实现的第一个输出到GPU
+    reference_D1.sync_device();        // 同步参考实现的第二个输出到GPU
 
     //
-    // Initialize the GEMM operator
+    // Initialize the GEMM operator  // 初始化GEMM操作符
     //
 
+    // 构造第一个GEMM的参数
     typename Gemm0::Arguments arguments_0{
-      problem_size_0,
-      tensor_A0.device_ref(),
-      tensor_B0_reordered.device_ref(),
-      {tensor_Bias0.device_data(), typename Gemm0::LayoutC::Stride(0)},
-      tensor_D0.device_ref(),
-      {alpha0, beta0}
+      problem_size_0,                                                      // GEMM问题规模
+      tensor_A0.device_ref(),                                             // A矩阵的设备引用
+      tensor_B0_reordered.device_ref(),                                   // 重排序后的B矩阵设备引用
+      {tensor_Bias0.device_data(), typename Gemm0::LayoutC::Stride(0)},   // 偏置向量（stride为0表示广播）
+      tensor_D0.device_ref(),                                             // 输出矩阵D的设备引用
+      {alpha0, beta0}                                                     // alpha和beta缩放因子
     };
 
+    // 构造第二个GEMM的参数（使用第一个GEMM的输出作为输入）
     typename Gemm1::Arguments arguments_1{
-      problem_size_1,
-      tensor_D0.device_ref(),
-      tensor_B1_reordered.device_ref(),
-      {tensor_Bias1.device_data(), typename Gemm1::LayoutC::Stride(0)},
-      tensor_D1.device_ref(),
-      {alpha1, beta1}
+      problem_size_1,                                                      // GEMM问题规模
+      tensor_D0.device_ref(),                                             // 使用第一个GEMM的输出作为A矩阵
+      tensor_B1_reordered.device_ref(),                                   // 重排序后的B矩阵设备引用
+      {tensor_Bias1.device_data(), typename Gemm1::LayoutC::Stride(0)},   // 偏置向量（stride为0表示广播）
+      tensor_D1.device_ref(),                                             // 最终输出矩阵D的设备引用
+      {alpha1, beta1}                                                     // alpha和beta缩放因子
     };
 
 
-    Gemm0 gemm_op_0;
-    Gemm1 gemm_op_1;
+    // 创建GEMM操作对象
+    Gemm0 gemm_op_0;                                                      // 第一个GEMM操作符实例
+    Gemm1 gemm_op_1;                                                      // 第二个GEMM操作符实例
 
-    cutlass::Status status = gemm_op_0.initialize(arguments_0);
+    // 初始化第一个GEMM操作符
+    cutlass::Status status = gemm_op_0.initialize(arguments_0);          // 传入参数并初始化
 
-    CUTLASS_CHECK(status);
+    CUTLASS_CHECK(status);                                                // 检查初始化状态
 
-    status = gemm_op_1.initialize(arguments_1);
+    // 初始化第二个GEMM操作符
+    status = gemm_op_1.initialize(arguments_1);                          // 传入参数并初始化
 
-    CUTLASS_CHECK(status);
+    CUTLASS_CHECK(status);                                                // 检查初始化状态
 
-    for(int i = 0; i < warm_ups; i++) {
-        status = gemm_op_0();
-        CUTLASS_CHECK(status);
-        status = gemm_op_1();
-        CUTLASS_CHECK(status);
+    // 预热运行（确保GPU达到稳定状态）
+    for(int i = 0; i < warm_ups; i++) {                                  // 执行warm_ups次预热
+        status = gemm_op_0();                                             // 运行第一个GEMM
+        CUTLASS_CHECK(status);                                            // 检查执行状态
+        status = gemm_op_1();                                             // 运行第二个GEMM
+        CUTLASS_CHECK(status);                                            // 检查执行状态
     }
 
     //
-    // Run the GEMM
+    // Run the GEMM  // 运行GEMM
     //
-    cudaEvent_t start, stop1, stop2;
-    cudaEventCreate(&start);
-    cudaEventCreate(&stop1);
-    cudaEventCreate(&stop2);
+    // 创建CUDA事件用于性能测量
+    cudaEvent_t start, stop1, stop2;                                     // 定义三个事件：开始、第一个GEMM结束、第二个GEMM结束
+    cudaEventCreate(&start);                                             // 创建开始事件
+    cudaEventCreate(&stop1);                                             // 创建第一个停止事件
+    cudaEventCreate(&stop2);                                             // 创建第二个停止事件
 
-    cudaEventRecord(start);
+    cudaEventRecord(start);                                              // 记录开始时间
 
-    for(int i = 0; i < runs; i++) {
-        status = gemm_op_0();
+    // 运行第一个GEMM多次并测量性能
+    for(int i = 0; i < runs; i++) {                                      // 执行runs次以获得平均性能
+        status = gemm_op_0();                                             // 执行第一个GEMM
 
-        CUTLASS_CHECK(status);
+        CUTLASS_CHECK(status);                                            // 检查执行状态
     }
-    cudaEventRecord(stop1);
-    for(int i = 0; i < runs; i++) {
-        status = gemm_op_1();
+    cudaEventRecord(stop1);                                              // 记录第一个GEMM结束时间
+    // 运行第二个GEMM多次并测量性能
+    for(int i = 0; i < runs; i++) {                                      // 执行runs次以获得平均性能
+        status = gemm_op_1();                                             // 执行第二个GEMM
 
-        CUTLASS_CHECK(status);
+        CUTLASS_CHECK(status);                                            // 检查执行状态
     }
 
-    cudaEventRecord(stop2);
-    cudaDeviceSynchronize();
-    float gemm0Time, gemm1Time, totalTime;
-    cudaEventElapsedTime(&gemm0Time, start, stop1);
-    cudaEventElapsedTime(&gemm1Time, stop1, stop2);
-    cudaEventElapsedTime(&totalTime, start, stop2);
-    std::cout << "gemm 0 time " << gemm0Time / (float)runs << " ms\n";
-    std::cout << "gemm 1 time " << gemm1Time / (float)runs << " ms\n";
-    std::cout << "Non-fusion time " << totalTime / (float)runs << " ms\n";
+    cudaEventRecord(stop2);                                              // 记录所有操作结束时间
+    cudaDeviceSynchronize();                                             // 等待所有GPU操作完成
+    // 计算各阶段耗时
+    float gemm0Time, gemm1Time, totalTime;                               // 定义时间变量
+    cudaEventElapsedTime(&gemm0Time, start, stop1);                     // 计算第一个GEMM耗时
+    cudaEventElapsedTime(&gemm1Time, stop1, stop2);                     // 计算第二个GEMM耗时
+    cudaEventElapsedTime(&totalTime, start, stop2);                     // 计算总耗时
+    std::cout << "gemm 0 time " << gemm0Time / (float)runs << " ms\n";  // 输出第一个GEMM平均耗时
+    std::cout << "gemm 1 time " << gemm1Time / (float)runs << " ms\n";  // 输出第二个GEMM平均耗时
+    std::cout << "Non-fusion time " << totalTime / (float)runs << " ms\n"; // 输出非融合总耗时
 
-    tensor_D0.sync_host();
-    tensor_D1.sync_host();
+    // 将结果从设备内存同步到主机内存
+    tensor_D0.sync_host();                                               // 同步第一个GEMM输出到主机
+    tensor_D1.sync_host();                                               // 同步第二个GEMM输出到主机
 
     //
-    // Verify
+    // Verify  // 验证结果正确性
     //
+    // 创建第一个GEMM的参考实现
     cutlass::reference::device::Gemm<
-        typename Gemm0::ElementA, typename Gemm0::LayoutA,
-        typename Gemm0::ElementB, typename Gemm0::LayoutB,
-        typename Gemm0::ElementC, typename Gemm0::LayoutC, ElementCompute,
-        ElementAccumulator, typename Gemm0::Operator>
-        reference_gemm_0;
+        typename Gemm0::ElementA, typename Gemm0::LayoutA,               // A矩阵类型和布局
+        typename Gemm0::ElementB, typename Gemm0::LayoutB,               // B矩阵类型和布局
+        typename Gemm0::ElementC, typename Gemm0::LayoutC, ElementCompute, // C矩阵类型、布局和计算类型
+        ElementAccumulator, typename Gemm0::Operator>                    // 累加器类型和操作符
+        reference_gemm_0;                                                // 参考GEMM实例
 
+    // 创建第二个GEMM的参考实现
     cutlass::reference::device::Gemm<
-        typename Gemm1::ElementA, typename Gemm1::LayoutA,
-        typename Gemm1::ElementB, typename Gemm1::LayoutB,
-        typename Gemm1::ElementC, typename Gemm1::LayoutC, ElementCompute,
-        ElementAccumulator, typename Gemm1::Operator>
-        reference_gemm_1;
+        typename Gemm1::ElementA, typename Gemm1::LayoutA,               // A矩阵类型和布局
+        typename Gemm1::ElementB, typename Gemm1::LayoutB,               // B矩阵类型和布局
+        typename Gemm1::ElementC, typename Gemm1::LayoutC, ElementCompute, // C矩阵类型、布局和计算类型
+        ElementAccumulator, typename Gemm1::Operator>                    // 累加器类型和操作符
+        reference_gemm_1;                                                // 参考GEMM实例
 
     reference_gemm_0(
       problem_size_0,
