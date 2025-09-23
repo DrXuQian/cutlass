@@ -58,10 +58,11 @@ bool run_nonfused_gemm_f16_sm80() {  // 运行非融合的FP16 GEMM（基准版�
   using ElementAccumulator = cutlass::half_t;  // 累加器元素类型：半精度浮点数
   using ElementCompute = cutlass::half_t;      // 计算元素类型：半精度浮点数
 
-  ElementCompute alpha0 = ElementCompute(1);
-  ElementCompute beta0 = ElementCompute(1); //beta=1 for bias
-  ElementCompute alpha1 = ElementCompute(1);
-  ElementCompute beta1 = ElementCompute(1); //beta=1 for bias
+  // 设置GEMM缩放因子
+  ElementCompute alpha0 = ElementCompute(1);   // 第一个GEMM的alpha缩放因子
+  ElementCompute beta0 = ElementCompute(1);    // beta=1 for bias  // beta=1用于偏置加法
+  ElementCompute alpha1 = ElementCompute(1);   // 第二个GEMM的alpha缩放因子
+  ElementCompute beta1 = ElementCompute(1);    // beta=1 for bias  // beta=1用于偏置加法
 
   // 定义线程块形状和warp形状
   using ThreadblockShape0 = cutlass::gemm::GemmShape<64, 64, 32>;   // 第一个GEMM线程块：64x64x32
@@ -70,28 +71,29 @@ bool run_nonfused_gemm_f16_sm80() {  // 运行非融合的FP16 GEMM（基准版�
   using WarpShape1 = cutlass::gemm::GemmShape<64, 64, 32>;          // 第二个GEMM Warp：64x64x32
   using InstructionShape = cutlass::gemm::GemmShape<16, 8, 16>;     // Tensor Core MMA指令形状
 
+  // 定义第一个GEMM操作（非融合版本）
   using Gemm0 = cutlass::gemm::device::Gemm<
-    cutlass::half_t,
-    cutlass::layout::RowMajor,
-    cutlass::half_t,
-    cutlass::layout::ColumnMajor,
-    ElementOutput,
-    cutlass::layout::RowMajor,
-    ElementAccumulator,
-    cutlass::arch::OpClassTensorOp,
-    cutlass::arch::Sm80,
-    ThreadblockShape0,
-    WarpShape0,
-    InstructionShape,
-    cutlass::epilogue::thread::LinearCombinationRelu<
-      ElementOutput,
-      128 / cutlass::sizeof_bits<ElementOutput>::value,
-      ElementAccumulator,
-      ElementCompute,
-      cutlass::epilogue::thread::ScaleType::NoBetaScaling
+    cutlass::half_t,                                     // A矩阵元素类型：FP16
+    cutlass::layout::RowMajor,                          // A矩阵布局：行主序
+    cutlass::half_t,                                     // B矩阵元素类型：FP16
+    cutlass::layout::ColumnMajor,                       // B矩阵布局：列主序（形成TN GEMM）
+    ElementOutput,                                       // C/D矩阵元素类型
+    cutlass::layout::RowMajor,                          // C/D矩阵布局：行主序
+    ElementAccumulator,                                  // 累加器类型
+    cutlass::arch::OpClassTensorOp,                     // 使用Tensor Core
+    cutlass::arch::Sm80,                                // 目标架构：SM80
+    ThreadblockShape0,                                  // 线程块形状
+    WarpShape0,                                         // Warp形状
+    InstructionShape,                                   // MMA指令形状
+    cutlass::epilogue::thread::LinearCombinationRelu<   // Epilogue：线性组合+ReLU
+      ElementOutput,                                    // 输出类型
+      128 / cutlass::sizeof_bits<ElementOutput>::value, // 向量化宽度
+      ElementAccumulator,                               // 累加器类型
+      ElementCompute,                                  // 计算类型
+      cutlass::epilogue::thread::ScaleType::NoBetaScaling  // 无beta缩放
     >,
-    cutlass::gemm::threadblock::GemmIdentityThreadblockSwizzle<1>,
-    3
+    cutlass::gemm::threadblock::GemmIdentityThreadblockSwizzle<1>,  // 线程块调度
+    3                                                   // 流水线阶段数
   >;
   using Gemm1 = cutlass::gemm::device::Gemm<
     cutlass::half_t,
@@ -135,11 +137,12 @@ bool run_fused_gemm_f16_sm80_shmem() {  // 运行融合的FP16 GEMM（共享内�
   using ElementAccumulator = cutlass::half_t;  // 累加器元素类型：半精度浮点数
   using ElementCompute = cutlass::half_t;      // 计算元素类型：半精度浮点数
 
-  ElementCompute alpha0 = ElementCompute(1);
-  //Fused kernel has built-in bias, setting beta=0
-  ElementCompute beta0 = ElementCompute(0); 
-  ElementCompute alpha1 = ElementCompute(1);
-  ElementCompute beta1 = ElementCompute(1); //beta=1 for bias
+  // 设置融合GEMM的缩放因子
+  ElementCompute alpha0 = ElementCompute(1);   // 第一个GEMM的alpha缩放因子
+  // Fused kernel has built-in bias, setting beta=0  // 融合内核内置偏置处理，设置beta=0
+  ElementCompute beta0 = ElementCompute(0);    // beta=0（融合内核已处理偏置）
+  ElementCompute alpha1 = ElementCompute(1);   // 第二个GEMM的alpha缩放因子
+  ElementCompute beta1 = ElementCompute(1);    // beta=1 for bias  // beta=1用于偏置加法
 
   // 定义线程块形状和warp形状
   using ThreadblockShape0 = cutlass::gemm::GemmShape<64, 64, 32>;   // 第一个GEMM线程块：64x64x32
@@ -168,33 +171,37 @@ bool run_fused_gemm_f16_sm80_shmem() {  // 运行融合的FP16 GEMM（共享内�
     >;
 
 
-  const bool SmemAccumulator = true;
+  // 关键配置：使用共享内存累加器（而非寄存器文件）
+  const bool SmemAccumulator = true;  // true=共享内存暂存，false=寄存器文件驻留
 
+  // 定义融合的B2B GEMM操作（共享内存暂存版本）
   using B2bGemm = cutlass::gemm::device::B2bGemm<
-    cutlass::half_t,
-    cutlass::layout::RowMajor,
-    cutlass::half_t,
-    cutlass::layout::ColumnMajor,
-    ElementOutput,
-    cutlass::layout::RowMajor,
-    ElementAccumulator,
-    cutlass::arch::OpClassTensorOp,
-    cutlass::arch::Sm80,
-    ThreadblockShape0,
-    ThreadblockShape1,
-    WarpShape0,
-    WarpShape1,
-    InstructionShape,
-    EpilogueOutputOp0,
-    EpilogueOutputOp1,
-    cutlass::gemm::threadblock::GemmIdentityThreadblockSwizzle<1>,
-    3,
-    SmemAccumulator
+    cutlass::half_t,                                     // A矩阵元素类型：FP16
+    cutlass::layout::RowMajor,                          // A矩阵布局：行主序
+    cutlass::half_t,                                     // B矩阵元素类型：FP16
+    cutlass::layout::ColumnMajor,                       // B矩阵布局：列主序
+    ElementOutput,                                       // C/D矩阵元素类型
+    cutlass::layout::RowMajor,                          // C/D矩阵布局：行主序
+    ElementAccumulator,                                  // 累加器类型
+    cutlass::arch::OpClassTensorOp,                     // 使用Tensor Core
+    cutlass::arch::Sm80,                                // 目标架构：SM80
+    ThreadblockShape0,                                  // 第一个GEMM线程块形状
+    ThreadblockShape1,                                  // 第二个GEMM线程块形状
+    WarpShape0,                                         // 第一个GEMM Warp形状
+    WarpShape1,                                         // 第二个GEMM Warp形状
+    InstructionShape,                                   // MMA指令形状
+    EpilogueOutputOp0,                                  // 第一个GEMM的Epilogue
+    EpilogueOutputOp1,                                  // 第二个GEMM的Epilogue
+    cutlass::gemm::threadblock::GemmIdentityThreadblockSwizzle<1>,  // 线程块调度
+    3,                                                  // 流水线阶段数
+    SmemAccumulator                                     // 使用共享内存累加器（关键！）
   >;
 
+  // 创建融合GEMM运行器
   B2bFusedGemmRun<B2bGemm> fusedGemm;
 
   std::cout << "Running Fused back-to-back FP16 TN GEMMs with shared memory staging...\n";
+  // 运行融合的B2B GEMM（共享内存版本）
   bool passed = fusedGemm.run(gemm_f16_sm80_problem_size_0, gemm_f16_sm80_problem_size_1, alpha0, beta0, alpha1, beta1);
   if(passed)
     std::cout << "Pass\n";
@@ -208,12 +215,14 @@ bool run_fused_gemm_f16_sm80_shmem() {  // 运行融合的FP16 GEMM（共享内�
 
 int main() {
 
+  // 定义测试函数列表
   std::vector<bool (*)()>funcs = {
-    &run_nonfused_gemm_f16_sm80,
-    &run_fused_gemm_f16_sm80_shmem
+    &run_nonfused_gemm_f16_sm80,      // 非融合版本（基准）
+    &run_fused_gemm_f16_sm80_shmem    // 融合版本（共享内存暂存）
   };
 
-  return testRun(80, funcs, "gemm f16 shmem staging");
+  // 运行测试（需要SM80架构支持）
+  return testRun(80, funcs, "gemm f16 shmem staging");  // 测试FP16 GEMM共享内存暂存
 
 
 }

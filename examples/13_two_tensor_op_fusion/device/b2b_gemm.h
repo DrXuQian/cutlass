@@ -57,60 +57,80 @@ namespace device {
 
 /////////////////////////////////////////////////////////////////////////////////////////////////
 
+// B2B GEMM设备端模板类
 template <
     /// Element type for A matrix operand
+    /// A矩阵操作数的元素类型
     typename ElementA_,
     /// Layout type for A matrix operand
+    /// A矩阵操作数的布局类型
     typename LayoutA_,
     /// Element type for B matrix operand
+    /// B矩阵操作数的元素类型
     typename ElementB_,
     /// Layout type for B matrix operand
+    /// B矩阵操作数的布局类型
     typename LayoutB_,
     /// Element type for C and D matrix operands
+    /// C和D矩阵操作数的元素类型
     typename ElementC_,
     /// Layout type for C and D matrix operands
+    /// C和D矩阵操作数的布局类型
     typename LayoutC_,
     /// Element type for internal accumulation
+    /// 内部累加的元素类型
     typename ElementAccumulator_ = ElementC_,
     /// Operator class tag
+    /// 操作符类标签（如SIMT、TensorOp）
     typename OperatorClass_ = arch::OpClassSimt,
     /// Tag indicating architecture to tune for
+    /// 指示要调优的架构标签（如SM70、SM80）
     typename ArchTag_ = arch::Sm70,
     /// Threadblock-level tile size (concept: GemmShape)
+    /// 第一个GEMM的线程块级tile大小（概念：GemmShape）
     typename ThreadblockShape0_ = typename DefaultGemmConfiguration<
         OperatorClass_, ArchTag_, ElementA_, ElementB_, ElementC_,
         ElementAccumulator_>::ThreadblockShape,
     /// Threadblock-level tile size (concept: GemmShape)
+    /// 第二个GEMM的线程块级tile大小（概念：GemmShape）
     typename ThreadblockShape1_ = typename DefaultGemmConfiguration<
         OperatorClass_, ArchTag_, ElementA_, ElementB_, ElementC_,
         ElementAccumulator_>::ThreadblockShape,
     /// Warp-level tile size (concept: GemmShape)
+    /// 第一个GEMM的Warp级tile大小（概念：GemmShape）
     typename WarpShape0_ = typename DefaultGemmConfiguration<
         OperatorClass_, ArchTag_, ElementA_, ElementB_, ElementC_,
         ElementAccumulator_>::WarpShape,
     /// Warp-level tile size (concept: GemmShape)
+    /// 第二个GEMM的Warp级tile大小（概念：GemmShape）
     typename WarpShape1_ = typename DefaultGemmConfiguration<
         OperatorClass_, ArchTag_, ElementA_, ElementB_, ElementC_,
         ElementAccumulator_>::WarpShape,
     /// Instruction-level tile size (concept: GemmShape)
+    /// 指令级tile大小（概念：GemmShape，如Tensor Core指令形状）
     typename InstructionShape_ = typename DefaultGemmConfiguration<
         OperatorClass_, ArchTag_, ElementA_, ElementB_, ElementC_,
         ElementAccumulator_>::InstructionShape,
     /// Epilogue output operator
+    /// 第一个GEMM的Epilogue输出操作符（如线性组合、ReLU等）
     typename EpilogueOutputOp0_ = typename DefaultGemmConfiguration<
         OperatorClass_, ArchTag_, ElementA_, ElementB_, ElementC_,
         ElementAccumulator_>::EpilogueOutputOp,
     /// Epilogue output operator
+    /// 第二个GEMM的Epilogue输出操作符（如线性组合、ReLU等）
     typename EpilogueOutputOp1_ = typename DefaultGemmConfiguration<
         OperatorClass_, ArchTag_, ElementA_, ElementB_, ElementC_,
         ElementAccumulator_>::EpilogueOutputOp,
     /// Threadblock-level swizzling operator
+    /// 线程块级调度操作符（用于优化线程块到tile的映射）
     typename ThreadblockSwizzle_ = threadblock::GemmIdentityThreadblockSwizzle<>,
     /// Number of stages used in the pipelined mainloop
+    /// 流水线主循环中使用的阶段数
     int Stages =
         DefaultGemmConfiguration<OperatorClass_, ArchTag_, ElementA_, ElementB_,
                                  ElementC_, ElementAccumulator_>::kStages,
     /// Stage accumulator in shared memory
+    /// 是否在共享内存中暂存累加器（true=共享内存，false=寄存器文件）
     bool SmemAccumulator = false,
     /// Access granularity of A matrix in units of elements  // A矩阵访问粒度（以元素为单位）
     int AlignmentA =
