@@ -30,95 +30,99 @@
  **************************************************************************************************/
 #pragma once
 
-#include <iostream>
-#include <fstream>
-#include <sstream>
+#include <iostream>      // C++标准输入输出流
+#include <fstream>       // 文件流操作
+#include <sstream>       // 字符串流操作
 
-#include "cutlass/util/host_tensor.h"
-#include "cutlass/util/tensor_view_io.h"
-#include "cutlass/util/distribution.h"
-#include "cutlass/util/reference/host/tensor_fill.h"
-#include "cutlass/util/reference/host/tensor_copy.h"
-#include "cutlass/util/reference/host/tensor_compare.h"
-#include "cutlass/util/reference/host/tensor_norm.h"
-#include "cutlass/util/reference/device/gemm.h"
-#include "cutlass/util/reference/device/gemm_complex.h"
-#include "cutlass/util/reference/device/tensor_relu.h"
+#include "cutlass/util/host_tensor.h"                      // 主机端张量容器
+#include "cutlass/util/tensor_view_io.h"                   // 张量视图I/O工具
+#include "cutlass/util/distribution.h"                     // 数据分布类型（均匀、高斯等）
+#include "cutlass/util/reference/host/tensor_fill.h"       // 张量填充工具
+#include "cutlass/util/reference/host/tensor_copy.h"       // 张量复制工具
+#include "cutlass/util/reference/host/tensor_compare.h"    // 张量比较工具
+#include "cutlass/util/reference/host/tensor_norm.h"       // 张量范数计算
+#include "cutlass/util/reference/device/gemm.h"            // 设备端GEMM参考实现
+#include "cutlass/util/reference/device/gemm_complex.h"    // 复数GEMM参考实现
+#include "cutlass/util/reference/device/tensor_relu.h"     // ReLU激活函数
 
-#include "reference/device/tensor_scale_bias.h"
-#include "helper.h"
+#include "reference/device/tensor_scale_bias.h"            // 张量缩放和偏置操作
+#include "helper.h"                                        // 辅助函数
 
+// 检查val1是否大于val2的宏定义
 #define CHECK_GT(val1, val2) \
     if((val1) <= (val2)) \
         std::cerr << __FILE__ << " " << __LINE__ << ": CHECK_GT failed\n";
+// 检查条件是否为真的宏定义
 #define CHECK_TRUE(val) \
     if(!(val)) \
         std::cerr << __FILE__ << " " << __LINE__ << ": CHECK_TRUE failed\n";
 
 ////////////////////////////////////////////////////////////////////////////////
 
+// 非融合的背靠背（B2B）GEMM运行器模板类
 template <typename Gemm0_, typename Gemm1_>
 struct B2bNonFusedGemmRun
 {
 
-  using Gemm0 = Gemm0_;
-  using Gemm1 = Gemm1_;
-  using ElementAccumulator = typename Gemm0::ElementAccumulator;
-  using ElementCompute = typename Gemm0::GemmKernel::Epilogue::OutputOp::ElementCompute;
+  using Gemm0 = Gemm0_;                                              // 第一个GEMM操作类型
+  using Gemm1 = Gemm1_;                                              // 第二个GEMM操作类型
+  using ElementAccumulator = typename Gemm0::ElementAccumulator;    // 累加器元素类型
+  using ElementCompute = typename Gemm0::GemmKernel::Epilogue::OutputOp::ElementCompute;  // 计算元素类型
 
-  /// Initialization
-  cutlass::Distribution::Kind init_A;
-  cutlass::Distribution::Kind init_B;
-  cutlass::Distribution::Kind init_C;
-  cutlass::Distribution::Kind init_Bias;
-  uint64_t seed;
+  /// Initialization  // 初始化参数
+  cutlass::Distribution::Kind init_A;      // A矩阵的初始化分布类型
+  cutlass::Distribution::Kind init_B;      // B矩阵的初始化分布类型
+  cutlass::Distribution::Kind init_C;      // C矩阵的初始化分布类型
+  cutlass::Distribution::Kind init_Bias;   // 偏置的初始化分布类型
+  uint64_t seed;                            // 随机数种子
 
   //
   // Methods
   //
 
+  // 构造函数，设置默认的初始化分布为均匀分布
   B2bNonFusedGemmRun(
-    cutlass::Distribution::Kind init_A_ = cutlass::Distribution::Uniform,
-    cutlass::Distribution::Kind init_B_ = cutlass::Distribution::Uniform,
-    cutlass::Distribution::Kind init_C_ = cutlass::Distribution::Uniform,
-    cutlass::Distribution::Kind init_Bias_ = cutlass::Distribution::Uniform,
-    uint64_t seed_ = 2080
+    cutlass::Distribution::Kind init_A_ = cutlass::Distribution::Uniform,      // A矩阵默认均匀分布
+    cutlass::Distribution::Kind init_B_ = cutlass::Distribution::Uniform,      // B矩阵默认均匀分布
+    cutlass::Distribution::Kind init_C_ = cutlass::Distribution::Uniform,      // C矩阵默认均匀分布
+    cutlass::Distribution::Kind init_Bias_ = cutlass::Distribution::Uniform,   // 偏置默认均匀分布
+    uint64_t seed_ = 2080                                                      // 默认随机种子
   ):
     init_A(init_A_), init_B(init_B_), init_C(init_C_), init_Bias(init_Bias_), seed(seed_) { }
 
-  /// Helper to initialize a tensor view
+  /// Helper to initialize a tensor view  // 辅助函数：初始化张量视图
   template <typename Element, typename Layout>
   bool initialize_tensor(
-    cutlass::TensorView<Element, Layout> view,
-    cutlass::Distribution::Kind dist_kind,
-    uint64_t seed) {
+    cutlass::TensorView<Element, Layout> view,  // 要初始化的张量视图
+    cutlass::Distribution::Kind dist_kind,      // 分布类型
+    uint64_t seed) {                            // 随机数种子
 
-    if (dist_kind == cutlass::Distribution::Uniform) {
+    if (dist_kind == cutlass::Distribution::Uniform) {  // 均匀分布
 
       cutlass::reference::host::TensorFillRandomUniform(
-        view, seed, 2, -2, 0);
+        view, seed, 2, -2, 0);  // 填充范围[-2, 2]的均匀随机数
     }
-    else if (dist_kind == cutlass::Distribution::Identity) {
+    else if (dist_kind == cutlass::Distribution::Identity) {  // 单位矩阵
 
-      cutlass::reference::host::TensorFillIdentity(view);
+      cutlass::reference::host::TensorFillIdentity(view);  // 填充为单位矩阵
     }
-    else if (dist_kind == cutlass::Distribution::Gaussian) {
+    else if (dist_kind == cutlass::Distribution::Gaussian) {  // 高斯分布
 
-      cutlass::reference::host::TensorFillRandomGaussian(view, seed, 0, 0.5);
+      cutlass::reference::host::TensorFillRandomGaussian(view, seed, 0, 0.5);  // 均值0，标准差0.5的高斯分布
     }
-    else if (dist_kind == cutlass::Distribution::Sequential) {
+    else if (dist_kind == cutlass::Distribution::Sequential) {  // 顺序填充
 
       cutlass::reference::host::BlockFillSequential(
-        view.data(), view.capacity());
+        view.data(), view.capacity());  // 按顺序填充递增的值
     }
-    else if (dist_kind == cutlass::Distribution::AllZeros) {
-      cutlass::reference::host::TensorFill(view, Element(0));
+    else if (dist_kind == cutlass::Distribution::AllZeros) {  // 全零
+      cutlass::reference::host::TensorFill(view, Element(0));  // 填充为0
     }
-    else if (dist_kind == cutlass::Distribution::AllOnes) {
-      cutlass::reference::host::TensorFill(view, Element(1));
+    else if (dist_kind == cutlass::Distribution::AllOnes) {  // 全一
+      cutlass::reference::host::TensorFill(view, Element(1));  // 填充为1
     }
     else {
-      std::cerr << "Not implemented\n";
+      std::cerr << "Not implemented\n";  // 未实现的分布类型
       return false;
     }
 
@@ -410,39 +414,39 @@ struct B2bFusedGemmRun
     init_A(init_A_), init_B(init_B_), init_C(init_C_),
     init_Scale(init_Scale_), init_Bias(init_Bias_), seed(seed_) { }
 
-  /// Helper to initialize a tensor view
+  /// Helper to initialize a tensor view  // 辅助函数：初始化张量视图
   template <typename Element, typename Layout>
   bool initialize_tensor(
-    cutlass::TensorView<Element, Layout> view,
-    cutlass::Distribution::Kind dist_kind,
-    uint64_t seed) {
+    cutlass::TensorView<Element, Layout> view,  // 要初始化的张量视图
+    cutlass::Distribution::Kind dist_kind,      // 分布类型
+    uint64_t seed) {                            // 随机数种子
 
-    if (dist_kind == cutlass::Distribution::Uniform) {
+    if (dist_kind == cutlass::Distribution::Uniform) {  // 均匀分布
 
       cutlass::reference::host::TensorFillRandomUniform(
-        view, seed, 2, -2, 0);
+        view, seed, 2, -2, 0);  // 填充范围[-2, 2]的均匀随机数
     }
-    else if (dist_kind == cutlass::Distribution::Identity) {
+    else if (dist_kind == cutlass::Distribution::Identity) {  // 单位矩阵
 
-      cutlass::reference::host::TensorFillIdentity(view);
+      cutlass::reference::host::TensorFillIdentity(view);  // 填充为单位矩阵
     }
-    else if (dist_kind == cutlass::Distribution::Gaussian) {
+    else if (dist_kind == cutlass::Distribution::Gaussian) {  // 高斯分布
 
-      cutlass::reference::host::TensorFillRandomGaussian(view, seed, 0, 0.5);
+      cutlass::reference::host::TensorFillRandomGaussian(view, seed, 0, 0.5);  // 均值0，标准差0.5的高斯分布
     }
-    else if (dist_kind == cutlass::Distribution::Sequential) {
+    else if (dist_kind == cutlass::Distribution::Sequential) {  // 顺序填充
 
       cutlass::reference::host::BlockFillSequential(
-        view.data(), view.capacity());
+        view.data(), view.capacity());  // 按顺序填充递增的值
     }
-    else if (dist_kind == cutlass::Distribution::AllZeros) {
-      cutlass::reference::host::TensorFill(view, Element(0));
+    else if (dist_kind == cutlass::Distribution::AllZeros) {  // 全零
+      cutlass::reference::host::TensorFill(view, Element(0));  // 填充为0
     }
-    else if (dist_kind == cutlass::Distribution::AllOnes) {
-      cutlass::reference::host::TensorFill(view, Element(1));
+    else if (dist_kind == cutlass::Distribution::AllOnes) {  // 全一
+      cutlass::reference::host::TensorFill(view, Element(1));  // 填充为1
     }
     else {
-      std::cerr << "Not implemented\n";
+      std::cerr << "Not implemented\n";  // 未实现的分布类型
       return false;
     }
 

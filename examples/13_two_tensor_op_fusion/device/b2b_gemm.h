@@ -30,23 +30,24 @@
  **************************************************************************************************/
 /*! \file
     \brief Template for a pipelined GEMM kernel. Does not compute batching or support split-K.
+    \brief 流水线GEMM内核模板。不计算批处理或支持split-K。
 */
 
 #pragma once
 
-#include "cutlass/cutlass.h"
-#include "cutlass/numeric_types.h"
-#include "cutlass/arch/arch.h"
-#include "cutlass/device_kernel.h"
+#include "cutlass/cutlass.h"                                // CUTLASS核心头文件
+#include "cutlass/numeric_types.h"                         // 数值类型定义
+#include "cutlass/arch/arch.h"                             // 架构相关定义
+#include "cutlass/device_kernel.h"                         // 设备内核基类
 
-#include "cutlass/gemm/threadblock/threadblock_swizzle.h"
+#include "cutlass/gemm/threadblock/threadblock_swizzle.h"  // 线程块调度策略
 
-#include "cutlass/gemm/device/default_gemm_configuration.h"
-#include "cutlass/epilogue/thread/linear_combination_relu.h"
+#include "cutlass/gemm/device/default_gemm_configuration.h" // 默认GEMM配置
+#include "cutlass/epilogue/thread/linear_combination_relu.h" // ReLU epilogue操作
 
-#include "kernel/b2b_gemm.h"
-#include "kernel/default_b2b_gemm.h"
-#include "kernel/default_b2b_gemm_smem_accumulator.h"
+#include "kernel/b2b_gemm.h"                               // B2B GEMM内核
+#include "kernel/default_b2b_gemm.h"                       // 默认B2B GEMM配置
+#include "kernel/default_b2b_gemm_smem_accumulator.h"      // 使用共享内存累加器的B2B GEMM
 
 ////////////////////////////////////////////////////////////////////////////////
 
@@ -111,55 +112,56 @@ template <
                                  ElementC_, ElementAccumulator_>::kStages,
     /// Stage accumulator in shared memory
     bool SmemAccumulator = false,
-    /// Access granularity of A matrix in units of elements
+    /// Access granularity of A matrix in units of elements  // A矩阵访问粒度（以元素为单位）
     int AlignmentA =
         DefaultGemmConfiguration<OperatorClass_, ArchTag_, ElementA_, ElementB_,
                                  ElementC_, ElementAccumulator_>::kAlignmentA,
-    /// Access granularity of B matrix in units of elements
+    /// Access granularity of B matrix in units of elements  // B矩阵访问粒度（以元素为单位）
     int AlignmentB =
         DefaultGemmConfiguration<OperatorClass_, ArchTag_, ElementA_, ElementB_,
                                  ElementC_, ElementAccumulator_>::kAlignmentB,
-    /// Operation performed by GEMM
+    /// Operation performed by GEMM  // GEMM执行的操作类型
     typename Operator_ = typename DefaultGemmConfiguration<
         OperatorClass_, ArchTag_, ElementA_, ElementB_, ElementC_,
         ElementAccumulator_>::Operator>
+// B2B GEMM设备端操作类
 class B2bGemm {
  public:
 
-  using ElementA = ElementA_;
-  using LayoutA = LayoutA_;
-  using TensorRefA = TensorRef<ElementA const, LayoutA>;
-  using ElementB = ElementB_;
-  using LayoutB = LayoutB_;
-  using TensorRefB = TensorRef<ElementB const, LayoutB>;
-  using ElementC = ElementC_;
-  using LayoutC = LayoutC_;
-  using TensorRefC = TensorRef<ElementC const, LayoutC>;
-  using TensorRefD = TensorRef<ElementC, LayoutC>;
-  using ElementAccumulator = ElementAccumulator_;
-  using OperatorClass = OperatorClass_;
-  using ArchTag = ArchTag_;
-  using ThreadblockShape0 = ThreadblockShape0_;
-  using ThreadblockShape1 = ThreadblockShape1_;
-  using WarpShape0 = WarpShape0_;
-  using WarpShape1 = WarpShape1_;
-  using InstructionShape = InstructionShape_;
-  using EpilogueOutputOp0 = EpilogueOutputOp0_;
-  using EpilogueOutputOp1 = EpilogueOutputOp1_;
-  using ThreadblockSwizzle = ThreadblockSwizzle_;
-  using Operator = Operator_;
-  static int const kStages = Stages;
-  static int const kAlignmentA = AlignmentA;
-  static int const kAlignmentB = AlignmentB;
-  static int const kAlignmentC = EpilogueOutputOp1::kCount;
-  static ComplexTransform const kTransformA = ComplexTransform::kNone;
-  static ComplexTransform const kTransformB = ComplexTransform::kNone;
+  using ElementA = ElementA_;                                      // A矩阵元素类型
+  using LayoutA = LayoutA_;                                        // A矩阵布局类型
+  using TensorRefA = TensorRef<ElementA const, LayoutA>;           // A矩阵张量引用类型
+  using ElementB = ElementB_;                                      // B矩阵元素类型
+  using LayoutB = LayoutB_;                                        // B矩阵布局类型
+  using TensorRefB = TensorRef<ElementB const, LayoutB>;           // B矩阵张量引用类型
+  using ElementC = ElementC_;                                      // C矩阵元素类型
+  using LayoutC = LayoutC_;                                        // C矩阵布局类型
+  using TensorRefC = TensorRef<ElementC const, LayoutC>;           // C矩阵张量引用类型（输入）
+  using TensorRefD = TensorRef<ElementC, LayoutC>;                 // D矩阵张量引用类型（输出）
+  using ElementAccumulator = ElementAccumulator_;                  // 累加器元素类型
+  using OperatorClass = OperatorClass_;                            // 操作类
+  using ArchTag = ArchTag_;                                        // 架构标签
+  using ThreadblockShape0 = ThreadblockShape0_;                    // 第一个GEMM的线程块形状
+  using ThreadblockShape1 = ThreadblockShape1_;                    // 第二个GEMM的线程块形状
+  using WarpShape0 = WarpShape0_;                                  // 第一个GEMM的Warp形状
+  using WarpShape1 = WarpShape1_;                                  // 第二个GEMM的Warp形状
+  using InstructionShape = InstructionShape_;                      // 指令形状
+  using EpilogueOutputOp0 = EpilogueOutputOp0_;                    // 第一个GEMM的epilogue操作
+  using EpilogueOutputOp1 = EpilogueOutputOp1_;                    // 第二个GEMM的epilogue操作
+  using ThreadblockSwizzle = ThreadblockSwizzle_;                  // 线程块调度策略
+  using Operator = Operator_;                                      // 操作类型
+  static int const kStages = Stages;                               // 流水线阶段数
+  static int const kAlignmentA = AlignmentA;                       // A矩阵对齐要求
+  static int const kAlignmentB = AlignmentB;                       // B矩阵对齐要求
+  static int const kAlignmentC = EpilogueOutputOp1::kCount;        // C矩阵对齐要求
+  static ComplexTransform const kTransformA = ComplexTransform::kNone;  // A矩阵复数变换（无）
+  static ComplexTransform const kTransformB = ComplexTransform::kNone;  // B矩阵复数变换（无）
 
-  /// Derived types
-  using ElementScaleBias = typename EpilogueOutputOp0::ElementCompute;
-  using LayoutScaleBias = layout::RowMajor;
+  /// Derived types  // 派生类型
+  using ElementScaleBias = typename EpilogueOutputOp0::ElementCompute;  // 缩放和偏置的元素类型
+  using LayoutScaleBias = layout::RowMajor;                             // 缩放和偏置的布局（行主序）
 
-  /// Define the kernel
+  /// Define the kernel  // 定义内核
   using B2bGemmKernel = typename kernel::DefaultB2bGemm<
     ElementA,
     LayoutA,
