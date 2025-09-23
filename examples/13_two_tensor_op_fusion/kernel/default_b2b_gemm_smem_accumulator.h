@@ -77,42 +77,61 @@ namespace kernel {
 ////////////////////////////////////////////////////////////////////////////////
 
 /// Partial specialization for Ampere Architecture
+/// Ampere架构的偏特化版本（使用共享内存累加器）
 template <
     /// Element type for A matrix operand
+    /// A矩阵操作数的元素类型
     typename ElementA,
     /// Layout type for A matrix operand
+    /// A矩阵操作数的布局类型
     typename LayoutA,
     /// Access granularity of A matrix in units of elements
+    /// A矩阵的访问粒度（元素为单位）
     int kAlignmentA,
     /// Element type for B matrix operand
+    /// B矩阵操作数的元素类型
     typename ElementB,
     /// Layout type for B matrix operand
+    /// B矩阵操作数的布局类型
     typename LayoutB,
     /// Access granularity of A matrix in units of elements
+    /// B矩阵的访问粒度（元素为单位）
     int kAlignmentB,
     /// Element type for C and D matrix operands
+    /// C和D矩阵操作数的元素类型
     typename ElementC,
     /// Element type for internal accumulation
+    /// 内部累加的元素类型
     typename ElementAccumulator,
     /// Threadblock-level tile size (concept: GemmShape)
+    /// 第一个GEMM的线程块级tile大小
     typename ThreadblockShape0,
     /// Threadblock-level tile size (concept: GemmShape)
+    /// 第二个GEMM的线程块级tile大小
     typename ThreadblockShape1,
     /// Warp-level tile size (concept: GemmShape)
+    /// 第一个GEMM的Warp级tile大小
     typename WarpShape0,
     /// Warp-level tile size (concept: GemmShape)
+    /// 第二个GEMM的Warp级tile大小
     typename WarpShape1,
     /// Warp-level tile size (concept: GemmShape)
+    /// 指令级tile大小
     typename InstructionShape,
     /// Epilogue output operator
+    /// 第一个GEMM的Epilogue输出操作
     typename EpilogueOutputOp0,
     /// Epilogue output operator
+    /// 第二个GEMM的Epilogue输出操作
     typename EpilogueOutputOp1,
     /// Threadblock-level swizzling operator
+    /// 线程块级调度操作
     typename ThreadblockSwizzle,
     /// Number of stages used in the pipelined mainloop
+    /// 流水线主循环的阶段数
     int Stages,
     /// Operation performed by GEMM
+    /// GEMM执行的操作
     typename Operator>
 struct DefaultB2bGemm<ElementA, LayoutA, kAlignmentA, ElementB, LayoutB, kAlignmentB, ElementC,
                    layout::RowMajor, ElementAccumulator, arch::OpClassTensorOp,
