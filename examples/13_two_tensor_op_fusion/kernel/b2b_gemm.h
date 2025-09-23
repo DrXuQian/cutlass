@@ -30,18 +30,19 @@
  **************************************************************************************************/
 /*! \file
     \brief Template for a pipelined GEMM kernel. Does not compute batching or support split-K.
+    \brief 流水线GEMM内核模板。不计算批处理或支持split-K。
 */
 
 #pragma once
 
-#include "cutlass/cutlass.h"
+#include "cutlass/cutlass.h"  // CUTLASS核心头文件
 
-#include "cutlass/gemm/gemm.h"
-#include "cutlass/matrix_coord.h"
-#include "cutlass/semaphore.h"
+#include "cutlass/gemm/gemm.h"  // GEMM相关定义
+#include "cutlass/matrix_coord.h"  // 矩阵坐标类
+#include "cutlass/semaphore.h"  // 信号量实现
 
-#include "kernel/b2b_gemm_grouped_problem_visitor.h"
-#include "threadblock/grouped_threadblock_swizzle.h"
+#include "kernel/b2b_gemm_grouped_problem_visitor.h"  // B2B GEMM分组问题访问器
+#include "threadblock/grouped_threadblock_swizzle.h"  // 分组线程块调度策略
 
 /////////////////////////////////////////////////////////////////////////////////////////////////
 

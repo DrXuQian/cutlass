@@ -29,55 +29,61 @@
  *
  **************************************************************************************************/
 
-#include <iostream>
+#include <iostream>  // C++标准输入输出流
 
-#include "cutlass/cutlass.h"
+#include "cutlass/cutlass.h"  // CUTLASS核心头文件
 
-#include "cutlass/conv/kernel/default_conv2d_fprop.h"
-#include "cutlass/conv/device/implicit_gemm_convolution.h"
+#include "cutlass/conv/kernel/default_conv2d_fprop.h"  // 默认2D卷积前向传播内核
+#include "cutlass/conv/device/implicit_gemm_convolution.h"  // 隐式GEMM卷积设备端实现
 
-#include "device/b2b_implicit_gemm_convolution.h"
-#include "b2b_conv2d_run.h"
-#include "test_run.h"
+#include "device/b2b_implicit_gemm_convolution.h"  // B2B隐式GEMM卷积
+#include "b2b_conv2d_run.h"  // B2B 2D卷积运行器
+#include "test_run.h"  // 测试运行辅助函数
 
 ////////////////////////////////////////////////////////////////////////////////
 
+// 第一个卷积的问题规模定义
 cutlass::conv::Conv2dProblemSize conv2d_f16_sm80_problem_size_0 (
-    {32, 56, 56, 64},    // input size (NHWC)
-    {64, 3, 3, 64},   // filter size (KRSC)
-    {1, 1, 1, 1},     // padding (pad_h, _, pad_w, _)
-    {1, 1},           // stride (stride_h, stride_w)
-    {1, 1},           // dilation (dilation_h, dilation_w)
-    {32, 56, 56, 64}     // output size (NPQK)
+    {32, 56, 56, 64},    // input size (NHWC)  // 输入尺寸：批次=32，高=56，宽=56，通道=64
+    {64, 3, 3, 64},      // filter size (KRSC)  // 滤波器尺寸：输出通道=64，高=3，宽=3，输入通道=64
+    {1, 1, 1, 1},        // padding (pad_h, _, pad_w, _)  // 填充：上=1，下=1，左=1，右=1
+    {1, 1},              // stride (stride_h, stride_w)  // 步长：垂直=1，水平=1
+    {1, 1},              // dilation (dilation_h, dilation_w)  // 扩张：垂直=1，水平=1
+    {32, 56, 56, 64}     // output size (NPQK)  // 输出尺寸：批次=32，高=56，宽=56，通道=64
   );
+// 第二个卷积的问题规模定义（1x1卷积）
 cutlass::conv::Conv2dProblemSize conv2d_f16_sm80_problem_size_1 (
-    {32, 56, 56, 64},    // input size (NHWC)
-    {128, 1, 1, 64},   // filter size (KRSC)
-    {0, 0, 0, 0},     // padding (pad_h, _, pad_w, _)
-    {1, 1},           // stride (stride_h, stride_w)
-    {1, 1},           // dilation (dilation_h, dilation_w)
-    {32, 56, 56, 128}     // output size (NPQK)
+    {32, 56, 56, 64},    // input size (NHWC)  // 输入尺寸（使用第一个卷积的输出）
+    {128, 1, 1, 64},     // filter size (KRSC)  // 滤波器尺寸：输出通道=128，1x1卷积核
+    {0, 0, 0, 0},        // padding (pad_h, _, pad_w, _)  // 无填充
+    {1, 1},              // stride (stride_h, stride_w)  // 步长：1x1
+    {1, 1},              // dilation (dilation_h, dilation_w)  // 无扩张
+    {32, 56, 56, 128}    // output size (NPQK)  // 输出尺寸：通道数增加到128
   );
 
 
+// 运行非融合的优化2D卷积前向传播（FP16，SM80架构）
 bool run_nonfused_conv2d_fprop_optimized_f16_sm80() {
 
-  using ElementA           = cutlass::half_t;
-  using ElementB           = cutlass::half_t;
-  using ElementC           = cutlass::half_t;
-  using ElementAccumulator = cutlass::half_t;
-  using ElementCompute     = cutlass::half_t;
+  using ElementA           = cutlass::half_t;  // 输入元素类型：半精度浮点数
+  using ElementB           = cutlass::half_t;  // 滤波器元素类型：半精度浮点数
+  using ElementC           = cutlass::half_t;  // 输出元素类型：半精度浮点数
+  using ElementAccumulator = cutlass::half_t;  // 累加器元素类型：半精度浮点数
+  using ElementCompute     = cutlass::half_t;  // 计算元素类型：半精度浮点数
 
-  ElementCompute alpha0 = ElementCompute(1);
-  ElementCompute beta0 = ElementCompute(1); //beta=1 for bias
-  ElementCompute alpha1 = ElementCompute(1);
-  ElementCompute beta1 = ElementCompute(1); //beta=1 for bias
+  ElementCompute alpha0 = ElementCompute(1);  // 第一个卷积的alpha系数
+  ElementCompute beta0 = ElementCompute(1);   //beta=1 for bias  // 第一个卷积的beta系数（用于偏置）
+  ElementCompute alpha1 = ElementCompute(1);  // 第二个卷积的alpha系数
+  ElementCompute beta1 = ElementCompute(1);   //beta=1 for bias  // 第二个卷积的beta系数（用于偏置）
 
-  using ThreadblockShape0 = cutlass::gemm::GemmShape<64, 64, 32>;
-  using WarpShape0 = cutlass::gemm::GemmShape<32, 32, 32>;
-  using ThreadblockShape1 = cutlass::gemm::GemmShape<64, 128, 32>;
-  using WarpShape1 = cutlass::gemm::GemmShape<64, 64, 32>;
-  using InstructionShape = cutlass::gemm::GemmShape<16, 8, 16>;
+  // 第一个卷积的配置
+  using ThreadblockShape0 = cutlass::gemm::GemmShape<64, 64, 32>;  // 线程块形状：64x64x32
+  using WarpShape0 = cutlass::gemm::GemmShape<32, 32, 32>;         // Warp形状：32x32x32
+  // 第二个卷积的配置
+  using ThreadblockShape1 = cutlass::gemm::GemmShape<64, 128, 32>; // 线程块形状：64x128x32（N维度更大）
+  using WarpShape1 = cutlass::gemm::GemmShape<64, 64, 32>;         // Warp形状：64x64x32
+  // Tensor Core指令形状
+  using InstructionShape = cutlass::gemm::GemmShape<16, 8, 16>;    // MMA指令形状：16x8x16
 
   using Conv2dFpropKernel0 = typename cutlass::conv::kernel::DefaultConv2dFprop<
     ElementA, cutlass::layout::TensorNHWC,
