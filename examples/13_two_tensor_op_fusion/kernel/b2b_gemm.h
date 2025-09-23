@@ -55,130 +55,147 @@ namespace detail {
 /// Utility struct for returning the type of the problem visitor used by the swizzling function,
 /// if it is a grouped swizzling function, or a default visitor. This is used only for defining
 /// the parameters of the problem visitor used in GroupedParams.
+/// 用于返回调度函数使用的问题访问器类型的工具结构。
+/// 如果是分组调度函数，返回对应的访问器，否则返回默认访问器。
+/// 仅用于在GroupedParams中定义问题访问器的参数。
 template <
-  typename B2bMma_,
-  typename ThreadblockSwizzle_,
-  typename Enable = void
+  typename B2bMma_,                 // B2B MMA操作类型
+  typename ThreadblockSwizzle_,     // 线程块调度策略类型
+  typename Enable = void            // SFINAE启用条件
 >
-struct ProblemVisitorOrDefault;
+struct ProblemVisitorOrDefault;     // 问题访问器或默认值
 
 /// Return a generic problem visitor for GEMM problems
+/// 为GEMM问题返回通用问题访问器
 template <
-  typename B2bMma_,
-  typename ThreadblockSwizzle_
+  typename B2bMma_,                  // B2B MMA操作类型
+  typename ThreadblockSwizzle_       // 线程块调度策略
 >
 struct ProblemVisitorOrDefault<B2bMma_,
                                ThreadblockSwizzle_,
                                typename platform::enable_if<
-                                                  ! cutlass::gemm::threadblock::detail::IsGroupedSwizzle<ThreadblockSwizzle_>::value
+                                                  ! cutlass::gemm::threadblock::detail::IsGroupedSwizzle<ThreadblockSwizzle_>::value  // 非分组调度
                                                 >::type> {
-  using value = B2bGemmGroupedProblemVisitor<typename B2bMma_::Shape,
-                                             GroupScheduleMode::kDeviceOnly,
-                                             128,
-                                             128,
+  using value = B2bGemmGroupedProblemVisitor<typename B2bMma_::Shape,      // 使用B2bMma的形状
+                                             GroupScheduleMode::kDeviceOnly,  // 仅设备端调度
+                                             128,                           // 线程块数量128
+                                             128,                           // 线程数量128
                                              platform::is_same<typename B2bMma_::LayoutC,
-                                                               cutlass::layout::ColumnMajor>::value>;
+                                                               cutlass::layout::ColumnMajor>::value>;  // 检查是否为列主序布局
 };
 
 /// Return the problem visitor specified by the swizzling function
+/// 返回调度函数指定的问题访问器
 template <
-  typename B2bMma_,
-  typename ThreadblockSwizzle_
+  typename B2bMma_,                  // B2B MMA操作类型
+  typename ThreadblockSwizzle_       // 线程块调度策略
 >
 struct ProblemVisitorOrDefault<B2bMma_,
                                ThreadblockSwizzle_,
                                typename platform::enable_if<
-                                                  cutlass::gemm::threadblock::detail::IsGroupedSwizzle<ThreadblockSwizzle_>::value
+                                                  cutlass::gemm::threadblock::detail::IsGroupedSwizzle<ThreadblockSwizzle_>::value  // 分组调度
                                                 >::type>  {
-  using value = typename ThreadblockSwizzle_::ProblemVisitor;
+  using value = typename ThreadblockSwizzle_::ProblemVisitor;  // 使用调度函数自带的访问器
 };
 
 } // namespace detail
 
 /////////////////////////////////////////////////////////////////////////////////////////////////
 
+// B2B GEMM内核模板
 template <
-  typename B2bMma_,               ///! Threadblock-scoped matrix multiply-accumulate
-  typename Epilogue_,             ///! Epilogue
-  typename ThreadblockSwizzle_    ///! Threadblock swizzling function
+  typename B2bMma_,               ///! Threadblock-scoped matrix multiply-accumulate  // 线程块级矩阵乘累加
+  typename Epilogue_,             ///! Epilogue  // Epilogue操作
+  typename ThreadblockSwizzle_    ///! Threadblock swizzling function  // 线程块调度函数
 >
 struct B2bGemm {
 
-  using B2bMma = B2bMma_;
-  using Epilogue = Epilogue_;
-  using OutputOp0 = typename B2bMma::OutputOp;
-  using OutputOp1 = typename Epilogue::OutputOp;
-  using ThreadblockSwizzle = ThreadblockSwizzle_;
+  // 类型别名定义
+  using B2bMma = B2bMma_;                                         // B2B MMA操作类型
+  using Epilogue = Epilogue_;                                     // Epilogue操作类型
+  using OutputOp0 = typename B2bMma::OutputOp;                    // 第一个GEMM的输出操作
+  using OutputOp1 = typename Epilogue::OutputOp;                  // 第二个GEMM的输出操作
+  using ThreadblockSwizzle = ThreadblockSwizzle_;                 // 线程块调度策略
 
-  using ElementA0 = typename B2bMma::IteratorA0::Element;
-  using LayoutA0 = typename B2bMma::IteratorA0::Layout;
-  using ElementB0 = typename B2bMma::IteratorB0::Element;
-  using LayoutB0 = typename B2bMma::IteratorB0::Layout;
-  using ElementB1 = typename B2bMma::IteratorB1::Element;
-  using LayoutB1 = typename B2bMma::IteratorB1::Layout;
-  using ElementC = typename Epilogue::OutputTileIterator::Element;
-  using LayoutC = typename Epilogue::OutputTileIterator::Layout;
+  // 第一个GEMM的输入类型
+  using ElementA0 = typename B2bMma::IteratorA0::Element;         // A0矩阵元素类型
+  using LayoutA0 = typename B2bMma::IteratorA0::Layout;           // A0矩阵布局
+  using ElementB0 = typename B2bMma::IteratorB0::Element;         // B0矩阵元素类型
+  using LayoutB0 = typename B2bMma::IteratorB0::Layout;           // B0矩阵布局
+  // 第二个GEMM的B矩阵类型
+  using ElementB1 = typename B2bMma::IteratorB1::Element;         // B1矩阵元素类型
+  using LayoutB1 = typename B2bMma::IteratorB1::Layout;           // B1矩阵布局
+  // 输出矩阵类型
+  using ElementC = typename Epilogue::OutputTileIterator::Element; // C矩阵元素类型
+  using LayoutC = typename Epilogue::OutputTileIterator::Layout;  // C矩阵布局
 
-  using ScaleBiasData = typename B2bMma::IteratorAccumulatorScaleBias::Element;
+  using ScaleBiasData = typename B2bMma::IteratorAccumulatorScaleBias::Element;  // 缩放和偏置数据类型
 
   /// Data types needed for higher-level containers. In some cases, a single type must be exposed
   /// despite the B2b GEMM using two GEMMs under the hood. In such cases, we select the values from
   /// the second GEMM (other than for ElementA/ElementB)
-  using ElementA = typename B2bMma::IteratorA0::Element;
-  using LayoutA = typename B2bMma::IteratorA0::Layout;
-  using ElementB = typename B2bMma::IteratorB0::Element;
-  using LayoutB = typename B2bMma::IteratorB0::Layout;
+  /// 高层容器所需的数据类型。在某些情况下，尽管B2B GEMM内部使用两个GEMM，
+  /// 但必须暴露单一类型。这种情况下，我们选择第二个GEMM的值（ElementA/ElementB除外）
+  using ElementA = typename B2bMma::IteratorA0::Element;  // A矩阵元素类型（使用第一个GEMM的）
+  using LayoutA = typename B2bMma::IteratorA0::Layout;    // A矩阵布局（使用第一个GEMM的）
+  using ElementB = typename B2bMma::IteratorB0::Element;  // B矩阵元素类型（使用第一个GEMM的）
+  using LayoutB = typename B2bMma::IteratorB0::Layout;    // B矩阵布局（使用第一个GEMM的）
 
-  static ComplexTransform const kTransformA = B2bMma::kTransformA;
-  static ComplexTransform const kTransformB = B2bMma::kTransformB;
-  using Operator = typename B2bMma::Operator0;
+  // 复数变换配置
+  static ComplexTransform const kTransformA = B2bMma::kTransformA;  // A矩阵的复数变换
+  static ComplexTransform const kTransformB = B2bMma::kTransformB;  // B矩阵的复数变换
+  using Operator = typename B2bMma::Operator0;                      // 操作符类型（使用第一个GEMM的）
 
-  using OperatorClass = typename Operator::OperatorClass;
-  using ThreadblockShape = typename B2bMma::Shape0;
-  using WarpShape = typename Operator::Shape;
-  using InstructionShape = typename Operator::InstructionShape;
-  using ArchTag = typename B2bMma::ArchTag;
+  // 架构相关类型
+  using OperatorClass = typename Operator::OperatorClass;           // 操作符类别（如TensorOp）
+  using ThreadblockShape = typename B2bMma::Shape0;                 // 线程块形状（使用第一个GEMM的）
+  using WarpShape = typename Operator::Shape;                       // Warp形状
+  using InstructionShape = typename Operator::InstructionShape;     // 指令形状
+  using ArchTag = typename B2bMma::ArchTag;                         // 架构标签（如SM80）
 
-  static int const kStages = B2bMma::kStages;
-  static int const kAlignmentA = B2bMma::IteratorA::AccessType::kElements;
-  static int const kAlignmentB = B2bMma::IteratorB::AccessType::kElements;
-  static int const kAlignmentC = Epilogue::OutputTileIterator::kElementsPerAccess;
+  // 配置常量
+  static int const kStages = B2bMma::kStages;                       // 流水线阶段数
+  static int const kAlignmentA = B2bMma::IteratorA::AccessType::kElements;  // A矩阵对齐要求
+  static int const kAlignmentB = B2bMma::IteratorB::AccessType::kElements;  // B矩阵对齐要求
+  static int const kAlignmentC = Epilogue::OutputTileIterator::kElementsPerAccess;  // C矩阵对齐要求
 
   using Mma = B2bMma;
   using EpilogueOutputOp = OutputOp1;
 
   /// Warp count (concept: GemmShape)
-  using WarpCount0 = typename B2bMma::WarpCount0;
-  static int const kThreadCount = 32 * WarpCount0::kCount;
+  /// Warp计数（概念：GemmShape）
+  using WarpCount0 = typename B2bMma::WarpCount0;           // 第一个GEMM的Warp数量
+  static int const kThreadCount = 32 * WarpCount0::kCount;  // 线程总数 = 32 * Warp数量
 
   /// Argument structure
+  /// 参数结构体
   struct Arguments {
 
     //
-    // Data members
+    // Data members  // 数据成员
     //
 
-    GemmUniversalMode mode = cutlass::gemm::GemmUniversalMode::kGemm;
-    GemmCoord problem_size_0{0,0,0};
-    GemmCoord problem_size_1{0,0,0};
-    typename B2bMma::IteratorA0::TensorRef ref_A0{};
-    typename B2bMma::IteratorB0::TensorRef ref_B0{};
-    typename Epilogue::OutputTileIterator::TensorRef ref_C0{};
-    typename B2bMma::IteratorAccumulatorScaleBias::TensorRef ref_Scale0{};
-    typename B2bMma::IteratorAccumulatorScaleBias::TensorRef ref_Bias0{};
-    typename B2bMma::IteratorB1::TensorRef ref_B1{};
-    typename Epilogue::OutputTileIterator::TensorRef ref_C1{};
-    typename Epilogue::OutputTileIterator::TensorRef ref_D1{};
-    int64_t batch_stride_A0{0};
-    int64_t batch_stride_B0{0};
-    int64_t batch_stride_B1{0};
-    int64_t batch_stride_C1{0};
-    int64_t batch_stride_D1{0};
-    int64_t batch_stride_Bias0{0};
-    int64_t batch_stride_Scale0{0};
-    typename OutputOp0::Params epilogue0 {};
-    typename OutputOp1::Params epilogue1 {};
-    int batch_count{1};
+    GemmUniversalMode mode = cutlass::gemm::GemmUniversalMode::kGemm;  // GEMM模式
+    GemmCoord problem_size_0{0,0,0};                                   // 第一个GEMM的问题规模 [M, N, K]
+    GemmCoord problem_size_1{0,0,0};                                   // 第二个GEMM的问题规模 [M, N, K]
+    typename B2bMma::IteratorA0::TensorRef ref_A0{};                   // 第一个GEMM的A矩阵引用
+    typename B2bMma::IteratorB0::TensorRef ref_B0{};                   // 第一个GEMM的B矩阵引用
+    typename Epilogue::OutputTileIterator::TensorRef ref_C0{};         // 第一个GEMM的C矩阵引用（偏置）
+    typename B2bMma::IteratorAccumulatorScaleBias::TensorRef ref_Scale0{};  // 第一个GEMM的缩放因子
+    typename B2bMma::IteratorAccumulatorScaleBias::TensorRef ref_Bias0{};   // 第一个GEMM的偏置
+    typename B2bMma::IteratorB1::TensorRef ref_B1{};                   // 第二个GEMM的B矩阵引用
+    typename Epilogue::OutputTileIterator::TensorRef ref_C1{};         // 第二个GEMM的C矩阵引用（偏置）
+    typename Epilogue::OutputTileIterator::TensorRef ref_D1{};         // 最终输出矩阵D的引用
+    int64_t batch_stride_A0{0};                                        // A0的批次步长
+    int64_t batch_stride_B0{0};                                        // B0的批次步长
+    int64_t batch_stride_B1{0};                                        // B1的批次步长
+    int64_t batch_stride_C1{0};                                        // C1的批次步长
+    int64_t batch_stride_D1{0};                                        // D1的批次步长
+    int64_t batch_stride_Bias0{0};                                     // Bias0的批次步长
+    int64_t batch_stride_Scale0{0};                                    // Scale0的批次步长
+    typename OutputOp0::Params epilogue0 {};                           // 第一个GEMM的Epilogue参数
+    typename OutputOp1::Params epilogue1 {};                           // 第二个GEMM的Epilogue参数
+    int batch_count{1};                                                // 批次数量
 
     //
     // Methods
@@ -237,6 +254,7 @@ struct B2bGemm {
   };
 
   // Arguments structure for grouped B2B problems
+  // 分组B2B问题的参数结构体
   struct GroupedArguments {
     GemmCoord* problem_size_0;
     GemmCoord* problem_size_1;
