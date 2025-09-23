@@ -29,9 +29,29 @@
  *
  **************************************************************************************************/
 
-/*
-  This example requires NVIDIA Ampere GPU or later.
-*/
+/**
+ * CUTLASS Example 19: Tensor Core 规范化布局操作示例
+ *
+ * 本示例展示了如何使用 CUTLASS 的 Warp 级 Tensor Core API 进行矩阵乘法。
+ * 这是理解 CUTLASS 底层 Tensor Core 编程模型的基础示例。
+ *
+ * 核心技术要点：
+ * ============
+ * 1. Tensor Core 操作：利用专用硬件单元加速矩阵运算
+ * 2. 规范化布局（Canonical Layout）：优化的数据排列方式，减少 bank 冲突
+ * 3. Warp 级编程：32 个线程协同执行矩阵运算
+ * 4. Fragment 概念：每个线程持有的矩阵数据片段
+ * 5. 双缓冲技术：计算与数据加载重叠
+ *
+ * 性能优化策略：
+ * ============
+ * - 使用 Tensor Core 指令（mma.sync）实现高吞吐量
+ * - 数据在寄存器和共享内存间高效传输
+ * - 通过 Fragment 分布减少线程间通信
+ * - 利用流水线隐藏内存延迟
+ *
+ * 本示例需要 NVIDIA Ampere GPU 或更新架构。
+ */
 
 // Standard Library includes
 #include <iostream>
