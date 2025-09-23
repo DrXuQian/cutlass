@@ -34,38 +34,43 @@
       Default kernel-level GEMM definitions combine threadblock-scoped matrix multiply-add with
       the appropriate threadblock-scoped epilogue.
 
+      默认内核级GEMM定义，将线程块级矩阵乘加与适当的线程块级epilogue结合。
+
       Note, CUTLASS epilogues universally target row-major outputs. Column-major outputs are
       accommodated by exchanging A and B operands and assuming transposed layouts. Partial
       specializations here choose 'device::GemmTransposed' to implement this functionality.
+
+      注意，CUTLASS epilogues普遍针对行主序输出。列主序输出通过交换A和B操作数
+      并假设转置布局来实现。这里的偏特化选择'device::GemmTransposed'来实现这个功能。
 */
 
 #pragma once
 
-#include "cutlass/cutlass.h"
+#include "cutlass/cutlass.h"                                          // CUTLASS核心头文件
 
-#include "cutlass/layout/matrix.h"
-#include "cutlass/numeric_types.h"
+#include "cutlass/layout/matrix.h"                                   // 矩阵布局定义
+#include "cutlass/numeric_types.h"                                   // 数值类型定义
 
-#include "cutlass/epilogue/threadblock/epilogue.h"
-#include "cutlass/epilogue/thread/linear_combination.h"
+#include "cutlass/epilogue/threadblock/epilogue.h"                   // 线程块epilogue
+#include "cutlass/epilogue/thread/linear_combination.h"              // 线性组合epilogue
 
-#include "cutlass/gemm/gemm.h"
-#include "cutlass/gemm/kernel/gemm_pipelined.h"
-#include "cutlass/gemm/threadblock/default_mma_core_sm75.h"
-#include "cutlass/gemm/threadblock/default_mma_core_sm70.h"
-#include "cutlass/gemm/threadblock/default_mma_core_sm80.h"
-#include "cutlass/gemm/threadblock/default_mma_core_simt.h"
-#include "cutlass/gemm/threadblock/threadblock_swizzle.h"
-#include "cutlass/epilogue/threadblock/default_epilogue_tensor_op.h"
-#include "cutlass/epilogue/threadblock/default_epilogue_volta_tensor_op.h"
-#include "cutlass/epilogue/threadblock/default_epilogue_simt.h"
+#include "cutlass/gemm/gemm.h"                                       // GEMM基础定义
+#include "cutlass/gemm/kernel/gemm_pipelined.h"                      // 流水线GEMM内核
+#include "cutlass/gemm/threadblock/default_mma_core_sm75.h"          // SM75默认MMA核心
+#include "cutlass/gemm/threadblock/default_mma_core_sm70.h"          // SM70默认MMA核心
+#include "cutlass/gemm/threadblock/default_mma_core_sm80.h"          // SM80默认MMA核心
+#include "cutlass/gemm/threadblock/default_mma_core_simt.h"          // SIMT默认MMA核心
+#include "cutlass/gemm/threadblock/threadblock_swizzle.h"            // 线程块调度
+#include "cutlass/epilogue/threadblock/default_epilogue_tensor_op.h" // Tensor Op epilogue
+#include "cutlass/epilogue/threadblock/default_epilogue_volta_tensor_op.h" // Volta Tensor Op epilogue
+#include "cutlass/epilogue/threadblock/default_epilogue_simt.h"      // SIMT epilogue
 
-#include "cutlass/transform/threadblock/predicated_tile_iterator.h"
+#include "cutlass/transform/threadblock/predicated_tile_iterator.h"  // 谓词tile迭代器
 
-#include "kernel/b2b_gemm.h"
-#include "kernel/grouped.h"
-#include "threadblock/default_b2b_mma.h"
-#include "threadblock/grouped_threadblock_swizzle.h"
+#include "kernel/b2b_gemm.h"                                         // B2B GEMM内核
+#include "kernel/grouped.h"                                          // 分组GEMM支持
+#include "threadblock/default_b2b_mma.h"                            // 默认B2B MMA
+#include "threadblock/grouped_threadblock_swizzle.h"                // 分组线程块调度
 
 ////////////////////////////////////////////////////////////////////////////////
 
@@ -75,78 +80,112 @@ namespace kernel {
 
 ////////////////////////////////////////////////////////////////////////////////
 
+// 判断是否为分组调度的辅助模板
 template <typename T>
 using IsGroupedSwizzle = cutlass::gemm::threadblock::detail::IsGroupedSwizzle<T>;
 
+// 默认B2B GEMM模板类（主模板）
 template <
   /// Element type for A matrix operand
+  /// A矩阵操作数的元素类型
   typename ElementA_,
   /// Layout type for A matrix operand
+  /// A矩阵操作数的布局类型
   typename LayoutA_,
   /// Access granularity of A matrix in units of elements
+  /// A矩阵的访问粒度（以元素为单位）
   int kAlignmentA,
   /// Element type for B matrix operand
+  /// B矩阵操作数的元素类型
   typename ElementB_,
   /// Layout type for B matrix operand
+  /// B矩阵操作数的布局类型
   typename LayoutB_,
   /// Access granularity of B matrix in units of elements
+  /// B矩阵的访问粒度（以元素为单位）
   int kAlignmentB,
   /// Element type for C and D matrix operands
+  /// C和D矩阵操作数的元素类型
   typename ElementC_,
   /// Layout type for C and D matrix operands
+  /// C和D矩阵操作数的布局类型
   typename LayoutC_,
   /// Element type for internal accumulation
+  /// 内部累加的元素类型
   typename ElementAccumulator,
   /// Operator class tag
+  /// 操作符类标签（如TensorOp、SIMT等）
   typename OperatorClass,
   /// Tag indicating architecture to tune for
+  /// 指示要调优的架构标签（如Sm75、Sm80等）
   typename ArchTag,
   /// Threadblock-level tile size (concept: GemmShape)
+  /// 第一个GEMM的线程块级tile大小（概念：GemmShape）
   typename ThreadblockShape0,
   /// Threadblock-level tile size (concept: GemmShape)
+  /// 第二个GEMM的线程块级tile大小（概念：GemmShape）
   typename ThreadblockShape1,
   /// Warp-level tile size (concept: GemmShape)
+  /// 第一个GEMM的Warp级tile大小（概念：GemmShape）
   typename WarpShape0,
   /// Warp-level tile size (concept: GemmShape)
+  /// 第二个GEMM的Warp级tile大小（概念：GemmShape）
   typename WarpShape1,
   /// Warp-level tile size (concept: GemmShape)
+  /// 指令级tile大小（概念：GemmShape）
   typename InstructionShape,
   /// Epilogue output operator
+  /// 第一个GEMM的Epilogue输出操作符
   typename EpilogueOutputOp0,
   /// Epilogue output operator
+  /// 第二个GEMM的Epilogue输出操作符
   typename EpilogueOutputOp1,
   /// Threadblock-level swizzling operator
+  /// 线程块级调度操作符
   typename ThreadblockSwizzle,
   /// Number of stages used in the pipelined mainloop
+  /// 流水线主循环中使用的阶段数
   int Stages,
   /// Operation performed by GEMM
+  /// GEMM执行的操作
   typename Operator,
   /// Stage accumulator in shared memory
+  /// 是否在共享内存中暂存累加器
   bool SmemAccumulator = false,
   /// Whether or not the operation is grouped
+  /// 操作是否为分组操作
   typename Enable = void
 >
-struct DefaultB2bGemm;
+struct DefaultB2bGemm;  // 默认B2B GEMM结构体
 
 ////////////////////////////////////////////////////////////////////////////////
 
 /// Partial specialization for Ampere Architecture
+/// Ampere架构的偏特化版本
 template <
     /// Element type for A matrix operand
+    /// A矩阵操作数的元素类型
     typename ElementA,
     /// Layout type for A matrix operand
+    /// A矩阵操作数的布局类型
     typename LayoutA,
     /// Access granularity of A matrix in units of elements
+    /// A矩阵的访问粒度（以元素为单位）
     int kAlignmentA,
     /// Element type for B matrix operand
+    /// B矩阵操作数的元素类型
     typename ElementB,
     /// Layout type for B matrix operand
+    /// B矩阵操作数的布局类型
     typename LayoutB,
-    /// Access granularity of A matrix in units of elements
+    /// Access granularity of B matrix in units of elements
+    /// B矩阵的访问粒度（以元素为单位）
     int kAlignmentB,
     /// Element type for C and D matrix operands
+    /// C和D矩阵操作数的元素类型
     typename ElementC,
     /// Element type for internal accumulation
+    /// 内部累加的元素类型
     typename ElementAccumulator,
     /// Threadblock-level tile size (concept: GemmShape)
     typename ThreadblockShape0,

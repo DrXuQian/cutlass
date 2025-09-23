@@ -31,15 +31,16 @@
 
 /*! \file
     \brief Scheduler for grouped B2b GEMMs
+    \brief 分组B2B GEMM的调度器
 */
 
 #pragma once
 
-#include "cutlass/cutlass.h"
-#include "cutlass/gemm/gemm.h"
-#include "cutlass/matrix_coord.h"
-#include "cutlass/gemm/kernel/grouped_problem_visitor.h"
-#include "cutlass/gemm/kernel/gemm_grouped_problem_visitor.h"
+#include "cutlass/cutlass.h"                                      // CUTLASS核心头文件
+#include "cutlass/gemm/gemm.h"                                   // GEMM相关定义
+#include "cutlass/matrix_coord.h"                                // 矩阵坐标定义
+#include "cutlass/gemm/kernel/grouped_problem_visitor.h"        // 分组问题访问器基类
+#include "cutlass/gemm/kernel/gemm_grouped_problem_visitor.h"   // GEMM分组问题访问器
 
 /////////////////////////////////////////////////////////////////////////////////////////////////
 
@@ -50,11 +51,12 @@ namespace kernel {
 /////////////////////////////////////////////////////////////////////////////////////////////////
 
 /// Visitor class to abstract away the algorithm for iterating over tiles
-template <typename ThreadblockShape,
-          GroupScheduleMode GroupScheduleMode_,
-          int PrefetchTileCount,
-          int ThreadCount,
-          bool Transposed = false>
+/// 访问器类，用于抽象化tile迭代算法
+template <typename ThreadblockShape,         // 线程块形状
+          GroupScheduleMode GroupScheduleMode_,  // 分组调度模式
+          int PrefetchTileCount,              // 预取tile数量
+          int ThreadCount,                    // 线程数量
+          bool Transposed = false>            // 是否转置（默认false）
 struct B2bGemmGroupedProblemVisitor : public GroupedProblemVisitor<
                                             detail::GemmGroupedProblemSizeHelper<ThreadblockShape, Transposed>,
                                             ThreadblockShape,
@@ -62,89 +64,99 @@ struct B2bGemmGroupedProblemVisitor : public GroupedProblemVisitor<
                                             PrefetchTileCount,
                                             ThreadCount> {
 
-  using ProblemSizeHelper = detail::GemmGroupedProblemSizeHelper<ThreadblockShape, Transposed>;
-  using Base = GroupedProblemVisitor<ProblemSizeHelper, ThreadblockShape, GroupScheduleMode_, PrefetchTileCount, ThreadCount>;
-  using BaseParams = typename Base::Params;
-  using SharedStorage = typename Base::SharedStorage;
-  static bool const kTransposed = Transposed;
+  // 类型定义
+  using ProblemSizeHelper = detail::GemmGroupedProblemSizeHelper<ThreadblockShape, Transposed>;  // 问题规模辅助类
+  using Base = GroupedProblemVisitor<ProblemSizeHelper, ThreadblockShape, GroupScheduleMode_, PrefetchTileCount, ThreadCount>;  // 基类
+  using BaseParams = typename Base::Params;     // 基类参数类型
+  using SharedStorage = typename Base::SharedStorage;  // 共享存储类型
+  static bool const kTransposed = Transposed;   // 转置标志常量
 
-  cutlass::gemm::GemmCoord const *problem_sizes0;
-  cutlass::gemm::GemmCoord const *problem_sizes1;
+  // 数据成员：两个GEMM的问题规模数组指针
+  cutlass::gemm::GemmCoord const *problem_sizes0;  // 第一个GEMM的问题规模数组
+  cutlass::gemm::GemmCoord const *problem_sizes1;  // 第二个GEMM的问题规模数组
 
+  // 参数结构体
   struct Params {
-    cutlass::gemm::GemmCoord const *problem_sizes0;
-    cutlass::gemm::GemmCoord const *problem_sizes1;
-    int32_t                         problem_count;
-    void const                     *workspace;
-    int32_t                         tile_count;
+    cutlass::gemm::GemmCoord const *problem_sizes0;  // 第一个GEMM的问题规模数组指针
+    cutlass::gemm::GemmCoord const *problem_sizes1;  // 第二个GEMM的问题规模数组指针
+    int32_t                         problem_count;   // 问题总数
+    void const                     *workspace;       // 工作空间指针（用于临时存储）
+    int32_t                         tile_count;      // tile总数
 
     //
-    // Methods
+    // Methods  // 方法
     //
 
     /// Ctor
+    /// 默认构造函数
     CUTLASS_HOST_DEVICE
     Params(): problem_sizes0(nullptr), problem_sizes1(nullptr),
               problem_count(0), workspace(nullptr), tile_count(0) { }
 
     /// Ctor
+    /// 参数化构造函数
     CUTLASS_HOST_DEVICE
     Params(
-      cutlass::gemm::GemmCoord const *problem_sizes0,
-      cutlass::gemm::GemmCoord const *problem_sizes1,
-      int32_t                         problem_count,
-      void const                     *workspace = nullptr,
-      int32_t                         tile_count = 0
+      cutlass::gemm::GemmCoord const *problem_sizes0,  // 第一个GEMM问题规模数组
+      cutlass::gemm::GemmCoord const *problem_sizes1,  // 第二个GEMM问题规模数组
+      int32_t                         problem_count,   // 问题数量
+      void const                     *workspace = nullptr,  // 可选的工作空间
+      int32_t                         tile_count = 0   // 可选的tile计数
     ):
-      problem_sizes0(problem_sizes0),
-      problem_sizes1(problem_sizes1),
-      problem_count(problem_count),
-      workspace(workspace),
-      tile_count(tile_count)
+      problem_sizes0(problem_sizes0),  // 初始化第一个GEMM规模
+      problem_sizes1(problem_sizes1),  // 初始化第二个GEMM规模
+      problem_count(problem_count),    // 初始化问题计数
+      workspace(workspace),            // 初始化工作空间
+      tile_count(tile_count)          // 初始化tile计数
     {}
 
     /// Convert the B2b-GEMM-specific parameters to those used by the base class
+    /// 将B2B GEMM特定的参数转换为基类使用的参数
     CUTLASS_HOST_DEVICE
     BaseParams to_base() const {
         return BaseParams(// Set problem_sizes as problem_sizes0 because these determine
                           // shape of the grid used in the non-grouped B2b GEMM
+                          // 使用problem_sizes0作为问题规模，因为它决定了非分组B2B GEMM的网格形状
                           problem_sizes0,
-                          problem_count,
-                          workspace,
-                          tile_count);
+                          problem_count,   // 问题数量
+                          workspace,       // 工作空间
+                          tile_count);     // tile计数
     }
 
   };
 
   //
-  // Methods
+  // Methods  // 方法
   //
+  // 设备端构造函数
   CUTLASS_DEVICE
   B2bGemmGroupedProblemVisitor(
-    Params const &params_,
-    SharedStorage &shared_storage_, 
-    int32_t block_idx
-  ): Base (
-        params_.to_base(),
-        shared_storage_, block_idx),
-     problem_sizes0(params_.problem_sizes0),
-     problem_sizes1(params_.problem_sizes1)
+    Params const &params_,              // 参数结构体引用
+    SharedStorage &shared_storage_,     // 共享存储引用
+    int32_t block_idx                   // 线程块索引
+  ): Base (                             // 调用基类构造函数
+        params_.to_base(),              // 转换后的基类参数
+        shared_storage_, block_idx),    // 共享存储和块索引
+     problem_sizes0(params_.problem_sizes0),  // 初始化第一个GEMM规模
+     problem_sizes1(params_.problem_sizes1)   // 初始化第二个GEMM规模
   {}
 
   /// Returns the problem size 0 for the current problem
+  /// 返回当前问题的第一个GEMM规模
   CUTLASS_HOST_DEVICE
   cutlass::gemm::GemmCoord problem_size0() const {
-    GemmCoord problem = problem_sizes0[this->problem_idx];
-    ProblemSizeHelper::possibly_transpose_problem(problem);
-    return problem;
+    GemmCoord problem = problem_sizes0[this->problem_idx];  // 从数组中获取当前问题规模
+    ProblemSizeHelper::possibly_transpose_problem(problem); // 根据转置标志可能转置问题
+    return problem;                                        // 返回问题规模
   }
 
   /// Returns the problem size 1 for the current problem
+  /// 返回当前问题的第二个GEMM规模
   CUTLASS_HOST_DEVICE
   cutlass::gemm::GemmCoord problem_size1() const {
-    GemmCoord problem = problem_sizes1[this->problem_idx];
-    ProblemSizeHelper::possibly_transpose_problem(problem);
-    return problem;
+    GemmCoord problem = problem_sizes1[this->problem_idx];  // 从数组中获取当前问题规模
+    ProblemSizeHelper::possibly_transpose_problem(problem); // 根据转置标志可能转置问题
+    return problem;                                        // 返回问题规模
   }
 };
 

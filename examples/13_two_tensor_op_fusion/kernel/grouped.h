@@ -31,21 +31,22 @@
 
 /*! \file
     \brief High-level interface for running a grouped version of a CUTLASS kernel
+    \brief 运行分组版本CUTLASS内核的高层接口
 */
 
 #pragma once
 
-#include "cutlass/cutlass.h"
-#include "cutlass/fast_math.h"
-#include "cutlass/gemm/gemm.h"
-#include "cutlass/matrix_coord.h"
-#include "cutlass/complex.h"
-#include "cutlass/semaphore.h"
+#include "cutlass/cutlass.h"                                      // CUTLASS核心头文件
+#include "cutlass/fast_math.h"                                   // 快速数学运算
+#include "cutlass/gemm/gemm.h"                                   // GEMM基础定义
+#include "cutlass/matrix_coord.h"                                // 矩阵坐标
+#include "cutlass/complex.h"                                     // 复数支持
+#include "cutlass/semaphore.h"                                   // 信号量支持
 
-#include "cutlass/layout/matrix.h"
-#include "cutlass/trace.h"
-#include "cutlass/gemm/kernel/gemm_transpose_operands.h"
-#include "cutlass/gemm/kernel/gemm_grouped_problem_visitor.h"
+#include "cutlass/layout/matrix.h"                              // 矩阵布局
+#include "cutlass/trace.h"                                      // 跟踪调试
+#include "cutlass/gemm/kernel/gemm_transpose_operands.h"        // GEMM操作数转置
+#include "cutlass/gemm/kernel/gemm_grouped_problem_visitor.h"   // GEMM分组问题访问器
 
 /////////////////////////////////////////////////////////////////////////////////////////////////
 
@@ -56,105 +57,123 @@ namespace kernel {
 /////////////////////////////////////////////////////////////////////////////////////////////////
 
 /// High-level interface for running a grouped version of a CUTLASS kernel
+/// 运行分组版本CUTLASS内核的高层接口
 template <
-  typename BaseKernel_   ///! Kernel-scoped matrix multiply-accumulate
+  typename BaseKernel_   ///! Kernel-scoped matrix multiply-accumulate  // 内核级矩阵乘加累加
 >
 struct GroupedKernel {
 public:
 
-  using BaseKernel = BaseKernel_;
-  using Epilogue = typename BaseKernel::Epilogue;
+  using BaseKernel = BaseKernel_;                                // 基础内核类型
+  using Epilogue = typename BaseKernel::Epilogue;                // Epilogue类型
 
   /// Types that need to be exported to work properly with device::BaseGrouped
-  using ElementA = typename BaseKernel::ElementA;
-  using LayoutA = typename BaseKernel::LayoutA;
-  using TensorRefA = TensorRef<ElementA const, LayoutA>;
-  static ComplexTransform const kTransformA = BaseKernel::kTransformA;
-  static int const kAlignmentA = BaseKernel::kAlignmentA;
+  /// 需要导出的类型，以便与device::BaseGrouped正常工作
+  // A矩阵相关类型
+  using ElementA = typename BaseKernel::ElementA;                 // A矩阵元素类型
+  using LayoutA = typename BaseKernel::LayoutA;                   // A矩阵布局类型
+  using TensorRefA = TensorRef<ElementA const, LayoutA>;          // A矩阵张量引用
+  static ComplexTransform const kTransformA = BaseKernel::kTransformA;  // A矩阵复数变换
+  static int const kAlignmentA = BaseKernel::kAlignmentA;         // A矩阵对齐要求
 
-  using ElementB = typename BaseKernel::ElementB;
-  using LayoutB = typename BaseKernel::LayoutB;
-  using TensorRefB = TensorRef<ElementB const, LayoutB>;
-  static ComplexTransform const kTransformB = BaseKernel::kTransformB;
-  static int const kAlignmentB = BaseKernel::kAlignmentB;
+  // B矩阵相关类型
+  using ElementB = typename BaseKernel::ElementB;                 // B矩阵元素类型
+  using LayoutB = typename BaseKernel::LayoutB;                   // B矩阵布局类型
+  using TensorRefB = TensorRef<ElementB const, LayoutB>;          // B矩阵张量引用
+  static ComplexTransform const kTransformB = BaseKernel::kTransformB;  // B矩阵复数变换
+  static int const kAlignmentB = BaseKernel::kAlignmentB;         // B矩阵对齐要求
 
-  using ElementC = typename BaseKernel::ElementC;
-  using LayoutC = typename BaseKernel::LayoutC;
-  using TensorRefC = TensorRef<ElementC const, LayoutC>;
-  using TensorRefD = TensorRef<ElementC, LayoutC>;
-  static int const kAlignmentC = BaseKernel::kAlignmentC;
+  // C/D矩阵相关类型
+  using ElementC = typename BaseKernel::ElementC;                 // C矩阵元素类型
+  using LayoutC = typename BaseKernel::LayoutC;                   // C矩阵布局类型
+  using TensorRefC = TensorRef<ElementC const, LayoutC>;          // C矩阵张量引用（输入）
+  using TensorRefD = TensorRef<ElementC, LayoutC>;                // D矩阵张量引用（输出）
+  static int const kAlignmentC = BaseKernel::kAlignmentC;         // C矩阵对齐要求
 
-  using ElementAccumulator = typename BaseKernel::Mma::Policy::Operator::ElementC;
+  // 计算相关类型
+  using ElementAccumulator = typename BaseKernel::Mma::Policy::Operator::ElementC;  // 累加器元素类型
 
-  using EpilogueOutputOp = typename BaseKernel::EpilogueOutputOp;
-  using ThreadblockSwizzle = typename BaseKernel::ThreadblockSwizzle;
+  using EpilogueOutputOp = typename BaseKernel::EpilogueOutputOp;       // Epilogue输出操作
+  using ThreadblockSwizzle = typename BaseKernel::ThreadblockSwizzle;   // 线程块调度策略
 
-  using Operator = typename BaseKernel::Operator;
-  using WarpMmaOperator = typename BaseKernel::Mma::Policy::Operator;
+  using Operator = typename BaseKernel::Operator;                       // 操作符类型
+  using WarpMmaOperator = typename BaseKernel::Mma::Policy::Operator;   // Warp级MMA操作符
 
-  using ArchMmaOperator = typename WarpMmaOperator::ArchMmaOperator;
-  using MathOperator = typename WarpMmaOperator::MathOperator;
-  using OperatorClass = typename WarpMmaOperator::OperatorClass;
-  using ArchTag = typename WarpMmaOperator::ArchTag;
-  using ThreadblockShape = typename BaseKernel::Mma::Shape;
-  using WarpShape = typename BaseKernel::WarpShape;
-  using InstructionShape = typename BaseKernel::InstructionShape;
-  static int const kStages = BaseKernel::Mma::kStages;
+  // 架构和数学操作相关
+  using ArchMmaOperator = typename WarpMmaOperator::ArchMmaOperator;    // 架构MMA操作符
+  using MathOperator = typename WarpMmaOperator::MathOperator;          // 数学操作符
+  using OperatorClass = typename WarpMmaOperator::OperatorClass;        // 操作符类别
+  using ArchTag = typename WarpMmaOperator::ArchTag;                    // 架构标签
+  using ThreadblockShape = typename BaseKernel::Mma::Shape;             // 线程块形状
+  using WarpShape = typename BaseKernel::WarpShape;                     // Warp形状
+  using InstructionShape = typename BaseKernel::InstructionShape;       // 指令形状
+  static int const kStages = BaseKernel::Mma::kStages;                  // 流水线阶段数
 
-  using Mma = typename BaseKernel::Mma;
+  using Mma = typename BaseKernel::Mma;                           // MMA操作类型
 
-  using Arguments = typename BaseKernel::GroupedArguments;
-  using Params = typename BaseKernel::GroupedParams;
-  using ProblemVisitor = typename ThreadblockSwizzle::ProblemVisitor;
+  using Arguments = typename BaseKernel::GroupedArguments;        // 分组参数类型
+  using Params = typename BaseKernel::GroupedParams;              // 分组参数类型
+  using ProblemVisitor = typename ThreadblockSwizzle::ProblemVisitor;  // 问题访问器类型
 
-  static int const kThreadCount = BaseKernel::kThreadCount;
+  static int const kThreadCount = BaseKernel::kThreadCount;       // 线程数
 
   /// Shared memory storage structure
+  /// 共享内存存储结构
   struct SharedStorage {
-    typename BaseKernel::SharedStorage kernel;
+    typename BaseKernel::SharedStorage kernel;             // 基础内核的共享存储
 
     // ProblemVisitor shared storage can't be overlapped with others
-    typename ProblemVisitor::SharedStorage problem_visitor;
+    // ProblemVisitor的共享存储不能与其他重叠
+    typename ProblemVisitor::SharedStorage problem_visitor;  // 问题访问器的共享存储
   };
 
 public:
 
   //
-  // Methods
+  // Methods  // 方法
   //
 
+  // 设备端构造函数
   CUTLASS_DEVICE
   GroupedKernel() { }
 
   /// Determines whether kernel satisfies alignment
+  /// 确定内核是否满足对齐要求
   static Status can_implement(cutlass::gemm::GemmCoord const & problem_size) {
-    return Status::kSuccess;
+    return Status::kSuccess;  // 总是返回成功（子类可重写）
   }
 
   static Status can_implement(Arguments const &args) {
-    return Status::kSuccess;
+    return Status::kSuccess;  // 总是返回成功（子类可重写）
   }
 
   /// Executes a kernel-level GEMM in a loop
+  /// 在循环中执行内核级GEMM
   CUTLASS_DEVICE
   void operator()(Params &params, SharedStorage &shared_storage) {
 
+    // 创建线程块调度器
     ThreadblockSwizzle swizzle(params.problem_visitor, shared_storage.problem_visitor, blockIdx.x);
 
+    // 如果需要转置，转置参数
     if (ProblemVisitor::kTransposed) {
       params.transpose();
     }
 
-    BaseKernel mma;
+    BaseKernel mma;  // 创建基础MMA内核
 
     // Outer 'persistent' loop to iterate over tiles
-    while (swizzle.problem_visitor.next_tile()) {
+    // 外层“持久”循环，遍历所有tile
+    while (swizzle.problem_visitor.next_tile()) {  // 获取下一个tile
 
+      // 从分组参数转换为单个问题的参数
       typename BaseKernel::Params mma_params = params.to_single_params(swizzle.problem_visitor);
+      // 使用调度器运行MMA
       mma.run_with_swizzle(mma_params, shared_storage.kernel, swizzle);
 
       // Next tile
-      swizzle.problem_visitor.advance(gridDim.x);
+      // 前进到下一个tile
+      swizzle.problem_visitor.advance(gridDim.x);  // 以网格大小为步长前进
     }
   }
 };
