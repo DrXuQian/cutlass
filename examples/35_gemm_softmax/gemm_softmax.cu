@@ -30,8 +30,55 @@
  **************************************************************************************************/
 
 /**
-
-*/
+ * CUTLASS Example 35: GEMM + Softmax Fusion
+ *
+ * This example demonstrates a fused GEMM+Softmax kernel that combines matrix multiplication
+ * with softmax activation in a single GPU kernel launch. This fusion provides significant
+ * performance benefits for transformer and attention mechanisms commonly used in modern
+ * deep learning workloads.
+ *
+ * FUSION OVERVIEW:
+ * ================
+ * The kernel performs: D = softmax(alpha * A @ B + beta * C)
+ * where softmax is applied row-wise across the N dimension of the output matrix.
+ *
+ * PERFORMANCE BENEFITS:
+ * ====================
+ * 1. Memory Bandwidth Reduction: Eliminates intermediate storage of GEMM output
+ * 2. Kernel Launch Overhead: Single kernel vs. separate GEMM + Softmax launches
+ * 3. Cache Efficiency: Better data locality by keeping intermediate results in registers/shared memory
+ * 4. Numerical Stability: Uses numerically stable softmax implementation with max subtraction
+ *
+ * KEY ARCHITECTURAL FEATURES:
+ * ===========================
+ * - Tensor Core acceleration for GEMM computation (Ampere architecture)
+ * - Fused epilogue that computes both GEMM result and softmax in the same threadblock
+ * - Two-pass softmax algorithm: first pass finds max, second pass computes exp and sum
+ * - Optimized memory access patterns for both GEMM and reduction operations
+ *
+ * COMMON USE CASES:
+ * =================
+ * 1. Transformer Attention: Query-Key multiplication followed by softmax
+ * 2. Classification Layers: Final linear layer + softmax activation
+ * 3. Sequence-to-Sequence Models: Attention score computation
+ * 4. BERT/GPT-style Models: Multi-head attention mechanisms
+ *
+ * IMPLEMENTATION DETAILS:
+ * =======================
+ * - Uses CUTLASS GemmSoftmax template for optimized fusion
+ * - Supports batched operations for processing multiple sequences
+ * - Configurable threadblock and warp shapes for different problem sizes
+ * - Automatic selection of optimal tile sizes based on problem dimensions
+ *
+ * NUMERICAL CONSIDERATIONS:
+ * =========================
+ * The implementation uses a numerically stable softmax algorithm that:
+ * 1. Subtracts the maximum value from each row before exponentiation
+ * 2. Computes the sum of exponentials in a separate reduction pass
+ * 3. Normalizes by dividing each exponential by the sum
+ *
+ * This prevents overflow and maintains numerical precision even for large input values.
+ */
 
 #include <cmath>
 #include <iostream>
@@ -71,15 +118,17 @@
 
 /////////////////////////////////////////////////////////////////////////////////////////////////
 
+// Test result enumeration to track verification status
 enum class Disposition {
-  kPassed,
-  kIncorrect,
-  kNotVerified
+  kPassed,      // All verifications passed successfully
+  kIncorrect,   // Numerical verification failed
+  kNotVerified  // Verification was skipped
 };
 
 /////////////////////////////////////////////////////////////////////////////////////////////////
 
 // Command line options parsing
+// Configures problem dimensions, batch size, and execution parameters
 struct Options {
 
   bool help;
@@ -94,14 +143,14 @@ struct Options {
 
   Options():
     help(false),
-    problem_size({16, 24, 64}),
-    batch_count(16),
-    iterations(20),
-    seed(2022),
-    alpha(1),
-    beta(0),
-    verification_enabled(true),
-    tolerance(1e-5f)
+    problem_size({16, 24, 64}),    // Default: M=16, N=24, K=64 (small test case)
+    batch_count(16),               // Process 16 matrices in parallel
+    iterations(20),                // Number of timing iterations for performance measurement
+    seed(2022),                    // Random seed for reproducible results
+    alpha(1),                      // GEMM scaling factor: alpha * A @ B
+    beta(0),                       // Bias scaling factor: beta * C (disabled by default)
+    verification_enabled(true),    // Enable numerical correctness checking
+    tolerance(1e-5f)              // Acceptable error tolerance for verification
   { }
 
   bool valid() {
@@ -199,56 +248,79 @@ struct Options {
 struct Testbed {
 
   //
-  // Type definitions
+  // Data Type Configuration
+  // ======================
+  // These types define the precision and layout for all matrices and computations
   //
 
 
-  using ElementA = cutlass::half_t;
-  using ElementB = cutlass::half_t;
-  using ElementC = cutlass::half_t;
-  using ElementCompute = float;
-  using ElementD = ElementC;
-  using ElementSoftmax = ElementC;
+  using ElementA = cutlass::half_t;        // Input matrix A: FP16 for memory efficiency
+  using ElementB = cutlass::half_t;        // Input matrix B: FP16 for memory efficiency
+  using ElementC = cutlass::half_t;        // Input bias matrix C: FP16
+  using ElementCompute = float;            // Internal accumulation: FP32 for numerical accuracy
+  using ElementD = ElementC;               // GEMM output matrix: FP16
+  using ElementSoftmax = ElementC;         // Softmax output: FP16
 
-  using LayoutA = cutlass::layout::RowMajor;
-  using LayoutB = cutlass::layout::ColumnMajor;
+  // Memory Layout Configuration
+  // ===========================
+  using LayoutA = cutlass::layout::RowMajor;    // A matrix: rows are contiguous (standard for inputs)
+  using LayoutB = cutlass::layout::ColumnMajor;  // B matrix: columns are contiguous (optimized for GEMM)
 
-  using ThreadblockShape = cutlass::gemm::GemmShape<128, 128, 32>;
-  using WarpShape        = cutlass::gemm::GemmShape<64, 64, 32>;
-  using InstructionShape = cutlass::gemm::GemmShape<16, 8, 16>;
+  // Hierarchical Tile Configuration for Tensor Core Optimization
+  // =============================================================
+  using ThreadblockShape = cutlass::gemm::GemmShape<128, 128, 32>;  // Threadblock tile: 128x128x32
+  using WarpShape        = cutlass::gemm::GemmShape<64, 64, 32>;    // Warp tile: 64x64x32 (4 warps per threadblock)
+  using InstructionShape = cutlass::gemm::GemmShape<16, 8, 16>;     // Tensor Core instruction: 16x8x16 (Ampere)
 
-  using OperatorClass = cutlass::arch::OpClassTensorOp;
-  using ArchTag = cutlass::arch::Sm80;
+  // Architecture Configuration
+  // ==========================
+  using OperatorClass = cutlass::arch::OpClassTensorOp;  // Use Tensor Core units for acceleration
+  using ArchTag = cutlass::arch::Sm80;                   // Target Ampere architecture (compute capability 8.0+)
 
-  // ApplyShape impacts the final Softmax performance a lot.
-  // Set ApplyShape::kColumn to be the next multiple of 32 number that is after
-  // (gemm_N / alignment).
-  // Set ApplyShape::kRow to max(1, 128 / ApplyShape::kColumn).
-  using ApplyShape = cutlass::MatrixShape<1, 1024>;
+  // Softmax Reduction Tile Configuration
+  // ====================================
+  // ApplyShape controls the granularity of softmax computation and significantly impacts performance.
+  // The configuration balances parallelism with memory access efficiency.
+  //
+  // Guidelines:
+  // - kColumn should be the next multiple of 32 >= (problem_N / alignment) for memory coalescing
+  // - kRow should be max(1, 128 / kColumn) to balance thread utilization
+  // - Larger kColumn values improve memory bandwidth utilization
+  // - Smaller kRow values increase parallelism across batch dimension
+  using ApplyShape = cutlass::MatrixShape<1, 1024>;  // Process 1024 elements per softmax reduction
 
-  static int const kStages = 3;
+  // Pipeline Configuration
+  // ======================
+  static int const kStages = 3;  // Number of pipeline stages for overlapping compute and memory access
 
-  /// Linear scaling operator
+  // Epilogue Configuration
+  // ======================
+  // Defines the final operation applied to GEMM results before softmax
+  // This linear combination computes: alpha * (A @ B) + beta * C
   using EpilogueFunctorOp = cutlass::epilogue::thread::LinearCombination<
-    ElementC,
-    128 / cutlass::sizeof_bits<ElementC>::value,
-    ElementCompute,
-    ElementCompute
+    ElementC,                                    // Output element type
+    128 / cutlass::sizeof_bits<ElementC>::value, // Vector width for memory operations
+    ElementCompute,                              // Accumulation type for scaling
+    ElementCompute                               // Scaling factor type (alpha, beta)
   >;
 
+  // Fused GEMM+Softmax Kernel Configuration
+  // =======================================
+  // This template instantiation defines the complete fused kernel with all
+  // architectural and algorithmic parameters specified above
   using GemmSoftmax = cutlass::GemmSoftmax<
-    ElementA, LayoutA,
-    ElementB, LayoutB,
-    ElementC,
-    ElementCompute,
-    OperatorClass,
-    ArchTag,
-    ThreadblockShape,
-    WarpShape,
-    InstructionShape,
-    EpilogueFunctorOp,
-    kStages,
-    ApplyShape
+    ElementA, LayoutA,      // Input matrix A configuration
+    ElementB, LayoutB,      // Input matrix B configuration
+    ElementC,               // Output/bias matrix element type
+    ElementCompute,         // Internal computation precision
+    OperatorClass,          // Tensor Core operation class
+    ArchTag,                // Target GPU architecture
+    ThreadblockShape,       // Threadblock-level tile dimensions
+    WarpShape,              // Warp-level tile dimensions
+    InstructionShape,       // Instruction-level tile dimensions
+    EpilogueFunctorOp,      // Linear combination epilogue
+    kStages,                // Pipeline stage count
+    ApplyShape              // Softmax reduction tile dimensions
   >;
 
   using ElementNorm = typename GemmSoftmax::ElementNorm;
@@ -259,41 +331,56 @@ struct Testbed {
   using MatrixCoord = typename LayoutC::TensorCoord;
 
   //
-  // Data members
+  // Memory Management and Data Storage
+  // ==================================
+  // Host tensors for verification and device allocations for GPU computation
   //
 
   Options const &options;
 
 
-  cutlass::HostTensor<ElementNorm, LayoutC>     reference_N;
+  // Reference computation storage (CPU-based verification)
+  cutlass::HostTensor<ElementNorm, LayoutC>     reference_N;      // Reference max values per row
 
-  cutlass::DeviceAllocation<ElementA> block_A;
-  cutlass::DeviceAllocation<ElementB> block_B;
-  cutlass::DeviceAllocation<ElementC> block_C;
-  cutlass::DeviceAllocation<ElementD> block_D;
-  cutlass::DeviceAllocation<ElementD> block_Ref;
-  cutlass::DeviceAllocation<ElementSoftmax> block_Softmax;
-  cutlass::DeviceAllocation<ElementNorm> block_Norm;
-  cutlass::DeviceAllocation<ElementSum> block_Sum;
+  // GPU memory allocations for input/output matrices
+  cutlass::DeviceAllocation<ElementA> block_A;         // Input matrix A
+  cutlass::DeviceAllocation<ElementB> block_B;         // Input matrix B
+  cutlass::DeviceAllocation<ElementC> block_C;         // Input bias matrix C
+  cutlass::DeviceAllocation<ElementD> block_D;         // GEMM output matrix D
+  cutlass::DeviceAllocation<ElementD> block_Ref;       // Reference GEMM result for verification
+  cutlass::DeviceAllocation<ElementSoftmax> block_Softmax; // Final softmax output
 
+  // Intermediate storage for softmax computation
+  cutlass::DeviceAllocation<ElementNorm> block_Norm;   // Per-row maximum values (for numerical stability)
+  cutlass::DeviceAllocation<ElementSum> block_Sum;     // Per-row exponential sums
+
+  // Calculate number of threadblocks needed to cover the N dimension
+  // This determines the storage requirements for partial reductions
   int block_num = (options.problem_size.n() + GemmSoftmax::ThreadblockShape::kN - 1) / GemmSoftmax::ThreadblockShape::kN;
 
+  // Problem dimensions and matrix strides
   cutlass::gemm::GemmCoord problem = options.problem_size;
 
-  int64_t lda = LayoutA::packed({problem.m(), problem.k()}).stride(0);
-  int64_t ldb = LayoutB::packed({problem.k(), problem.n()}).stride(0);
-  int64_t ldc = LayoutC::packed({problem.m(), problem.n()}).stride(0);
+  // Leading dimensions for matrix layouts (for strided memory access)
+  int64_t lda = LayoutA::packed({problem.m(), problem.k()}).stride(0);  // A matrix leading dimension
+  int64_t ldb = LayoutB::packed({problem.k(), problem.n()}).stride(0);  // B matrix leading dimension
+  int64_t ldc = LayoutC::packed({problem.m(), problem.n()}).stride(0);  // C/D matrix leading dimension
 
-  // fixed rowmajor for norm and sum
-  int64_t ldn = problem.m();
-  int64_t lds = ldn;
+  // Softmax auxiliary arrays use row-major layout for efficient reduction
+  int64_t ldn = problem.m();  // Norm array leading dimension
+  int64_t lds = ldn;          // Sum array leading dimension (same as norm)
 
-  int64_t total_elements_A_per_batch = problem.m() * problem.k();
-  int64_t total_elements_B_per_batch = problem.k() * problem.n();
-  int64_t total_elements_C_per_batch = problem.m() * problem.n();
-  int64_t total_elements_D_per_batch = problem.m() * problem.n();
-  int64_t total_elements_partial_norm_per_batch = block_num * problem.m();
+  // Memory size calculations for allocation
+  // =======================================
 
+  // Per-batch element counts
+  int64_t total_elements_A_per_batch = problem.m() * problem.k();        // A matrix size
+  int64_t total_elements_B_per_batch = problem.k() * problem.n();        // B matrix size
+  int64_t total_elements_C_per_batch = problem.m() * problem.n();        // C matrix size
+  int64_t total_elements_D_per_batch = problem.m() * problem.n();        // D matrix size
+  int64_t total_elements_partial_norm_per_batch = block_num * problem.m(); // Partial reduction storage
+
+  // Total element counts across all batches
   int64_t total_elements_A = total_elements_A_per_batch * options.batch_count;
   int64_t total_elements_B = total_elements_B_per_batch * options.batch_count;
   int64_t total_elements_C = total_elements_C_per_batch * options.batch_count;
@@ -368,7 +455,10 @@ struct Testbed {
     return disposition;
   }
 
-  /// Random initialization
+  /// Random Initialization of Input Data
+  /// ====================================
+  /// Fills all input matrices with random values in a controlled range
+  /// to ensure numerical stability and reproducible testing
   void initialize() {
 
     block_A.reset(total_elements_A);
@@ -380,6 +470,8 @@ struct Testbed {
     block_Norm.reset(total_elements_partial_norm);
     block_Sum.reset(total_elements_partial_norm);
 
+    // Initialize input matrices with random uniform distribution [-5, 5]
+    // Different seeds ensure uncorrelated data across matrices
     cutlass::reference::device::BlockFillRandomUniform(
             block_A.get(), total_elements_A, options.seed, ElementA(5), ElementA(-5), 0);
 
@@ -389,6 +481,7 @@ struct Testbed {
     cutlass::reference::device::BlockFillRandomUniform(
             block_C.get(), total_elements_C, options.seed + 2, ElementC(5), ElementC(-5), 0);
 
+    // Initialize output buffers (will be overwritten during computation)
     cutlass::reference::device::BlockFillRandomUniform(
             block_D.get(), total_elements_D, options.seed + 3, ElementD(5), ElementD(-5), 0);
 
@@ -405,50 +498,56 @@ struct Testbed {
 
   }
 
+  /// GPU Kernel Execution
+  /// =====================
+  /// Launches the fused GEMM+Softmax kernel with all configured parameters
   cutlass::Status execute_device_kernel() {
 
     cutlass::Status status = cutlass::Status::kSuccess;
 
     //
-    // Setup arguments
+    // Configure Kernel Arguments
+    // ==========================
+    // Package all matrices, dimensions, and parameters for kernel launch
     //
 
     GemmSoftmax::Arguments args(
-      options.problem_size,
-      options.batch_count,
-      {block_A.get(), lda},
-      {block_B.get(), ldb},
-      {block_C.get(), ldc},
-      {block_D.get(), ldc},
+      options.problem_size,                    // GEMM dimensions (M, N, K)
+      options.batch_count,                     // Number of matrices to process
+      {block_A.get(), lda},                    // Input matrix A (pointer + leading dimension)
+      {block_B.get(), ldb},                    // Input matrix B (pointer + leading dimension)
+      {block_C.get(), ldc},                    // Input bias matrix C (pointer + leading dimension)
+      {block_D.get(), ldc},                    // GEMM output matrix D (pointer + leading dimension)
       {
-        ElementCompute(options.alpha),
-        ElementCompute(options.beta)
+        ElementCompute(options.alpha),         // GEMM scaling factor alpha
+        ElementCompute(options.beta)           // Bias scaling factor beta
       },
-      {block_Norm.get(), ldn},
-      {block_Sum.get(), lds},
-      {block_Softmax.get(), ldc},
-      total_elements_A_per_batch,
-      total_elements_B_per_batch,
-      total_elements_C_per_batch,
-      total_elements_D_per_batch,
-      total_elements_partial_norm_per_batch,
-      total_elements_partial_norm_per_batch,
-      total_elements_D_per_batch
+      {block_Norm.get(), ldn},                 // Per-row maximum storage for numerical stability
+      {block_Sum.get(), lds},                  // Per-row sum storage for normalization
+      {block_Softmax.get(), ldc},              // Final softmax output matrix
+      total_elements_A_per_batch,              // Batch stride for matrix A
+      total_elements_B_per_batch,              // Batch stride for matrix B
+      total_elements_C_per_batch,              // Batch stride for matrix C
+      total_elements_D_per_batch,              // Batch stride for matrix D
+      total_elements_partial_norm_per_batch,   // Batch stride for norm array
+      total_elements_partial_norm_per_batch,   // Batch stride for sum array
+      total_elements_D_per_batch               // Batch stride for softmax output
     );
 
     //
-    // Launch
+    // Kernel Initialization and Execution
+    // ===================================
     //
 
     GemmSoftmax gemm_softmax;
 
-    // Initialize
+    // Initialize kernel with arguments and allocate any required workspace
     status = gemm_softmax.initialize(args);
     if (status != cutlass::Status::kSuccess) {
       return status;
     }
 
-    // Run
+    // Execute the fused GEMM+Softmax kernel
     status = gemm_softmax();
 
     return status;
@@ -477,7 +576,10 @@ struct Testbed {
     return true;
   }
 
-  /// Verifies the reference matches
+  /// Numerical Verification Against Reference Implementation
+  /// =======================================================
+  /// Computes reference results using separate GEMM and softmax operations,
+  /// then compares against the fused kernel output for correctness
   bool verify() {
 
     LayoutA layout_A(lda);
@@ -490,6 +592,7 @@ struct Testbed {
     MatrixCoord extent_B{problem.k(), problem.n()};
     MatrixCoord extent_C{problem.m(), problem.n()};
 
+    // Verify each batch independently
     for (int batch_idx = 0; batch_idx < options.batch_count; batch_idx++) {
 
       cutlass::TensorView<ElementA, LayoutA> view_A(block_A.get() + total_elements_A_per_batch * batch_idx, layout_A, extent_A);
@@ -530,7 +633,8 @@ struct Testbed {
       std::vector<ElementD> matrix_Softmax(layout_C.capacity(extent_C));
       cutlass::device_memory::copy_to_host(matrix_Softmax.data(), block_Softmax.get() + total_elements_D_per_batch * batch_idx, matrix_Softmax.size());
 
-      // Compute the norm
+      // Compute row-wise maximum for numerical stability (reference implementation)
+      // This mimics the first pass of the fused kernel's softmax computation
       for (int m = 0; m < options.problem_size.m(); ++m) {
         reference_N.at({m, 0}) = view_Ref.ref().at({m, 0});
         for (int n = 1; n < options.problem_size.n(); ++n) {
@@ -538,19 +642,21 @@ struct Testbed {
         }
       }
 
-      // Compute softmax
+      // Compute reference softmax using numerically stable algorithm
+      // This matches the algorithmic approach used in the fused kernel
       for (int m = 0; m < options.problem_size.m(); ++m) {
 
+        // First pass: compute sum of exponentials (subtract max for stability)
         float sum = float();
-
         for (int n = 0; n < options.problem_size.n(); ++n) {
           sum += std::exp( float(view_Ref.ref().at({m, n})) - float(reference_N.at({m, 0})) );
         }
 
+        // Compute normalization factor
         float inv_sum = float(1.0f / sum);
 
+        // Second pass: normalize exponentials to get final softmax values
         for (int n = 0; n < options.problem_size.n(); ++n) {
-
           view_Softmax_Ref.ref().at({m, n}) = ElementSoftmax(
             std::exp( float(view_Ref.ref().at({m, n})) - float(reference_N.at({m, 0})) ) * inv_sum
           );

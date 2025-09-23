@@ -100,6 +100,7 @@ struct Options {
 
   using LayoutOutput = LayoutOutput_;
 
+  // Layout detection for transformer-style matrix configurations
   static bool const kIsColumnMajorOutput = cutlass::platform::is_same<LayoutOutput, cutlass::layout::ColumnMajor>::value;
 
   bool help;
@@ -275,9 +276,9 @@ struct Testbed {
   using LayoutInputB0 = cutlass::layout::ColumnMajor;
   using LayoutOutput = LayoutOutput_;
 
+  // Layout detection and numerical configuration
   static bool const kIsColumnMajorOutput = cutlass::platform::is_same<LayoutOutput, cutlass::layout::ColumnMajor>::value;
-  // turn of shifted K by default
-  static bool const kIsShiftedVariance = false;
+  static bool const kIsShiftedVariance = false;  // Disable variance shifting for simplicity (may impact numerical stability)
 
   /// Linear scaling operator
   using EpilogueFunctorOp = cutlass::epilogue::thread::LinearCombination<

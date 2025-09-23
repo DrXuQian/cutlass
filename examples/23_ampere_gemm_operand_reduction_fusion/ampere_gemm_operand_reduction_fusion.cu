@@ -30,15 +30,33 @@
  **************************************************************************************************/
 
 /**
-The example demonstrates how to reduce one of the operands of the GEMM along the k-dimension when
-computing GEMM.  So the output also contains either a Mx1 or 1XN vector.  It only works with Ampere
-16x8x16 FP16/BF16 tensor cores, though it is not difficult to apply to other Turing/Ampere tensor
-core instructions.
-
-Most of the reduction is done in gemm/warp level, see gemm/warp/mma_with_reduction_tensor_op.h
-A few bit of reduction is done in the epilogue before storing the vector, see
-epilogue/threadblock/epilogue_gemm_k_reduction.h 
-*/
+ * Example 23: GEMM with Operand Reduction Fusion
+ *
+ * This example demonstrates an advanced fusion technique where GEMM computation is combined
+ * with reduction of one operand along the K dimension. This produces both the standard GEMM
+ * output C = alpha * A * B + beta * C and a reduced vector (either Mx1 or 1xN).
+ *
+ * Key Features:
+ * - Fuses reduction operation with GEMM computation
+ * - Reduces either A or B operand along K dimension during GEMM
+ * - Optimized for Ampere architecture with 16x8x16 Tensor Core operations
+ * - Supports both serial and parallel split-K strategies
+ *
+ * Performance Benefits:
+ * - Eliminates separate reduction kernel launch
+ * - Reduces memory bandwidth by avoiding extra reads
+ * - Better data locality as reduction happens during GEMM computation
+ *
+ * Use Cases:
+ * - Computing row/column sums while performing matrix multiplication
+ * - Batch normalization computations
+ * - Statistical operations in neural networks
+ *
+ * Implementation Details:
+ * - Reduction happens primarily at warp level (gemm/warp/mma_with_reduction_tensor_op.h)
+ * - Final reduction in epilogue (epilogue/threadblock/epilogue_gemm_k_reduction.h)
+ * - Works with FP16/BF16 data types on Ampere SM80 architecture
+ */
 
 #include <iostream>
 #include <fstream>
@@ -63,59 +81,92 @@ epilogue/threadblock/epilogue_gemm_k_reduction.h
 
 #include "helper.h"
 
+// =====================================================================
+// Data Type Configuration
+// =====================================================================
 // The code section below describes datatype for input, output tensors and computation between
-// elements 
-using ElementAccumulator = float;                  // Data type of accumulator
-using ElementComputeEpilogue = ElementAccumulator; // Data type of epilogue computation
-using ElementInputA = cutlass::bfloat16_t;         // Data type of elements in input tensor
-using ElementInputB = cutlass::bfloat16_t;         // Data type of elements in input tensor
-using ElementOutput = cutlass::bfloat16_t;         // Data type of elements in output tensor
+// elements
+using ElementAccumulator = float;                  // Data type of accumulator - float for higher precision
+using ElementComputeEpilogue = ElementAccumulator; // Data type of epilogue computation - matches accumulator
+using ElementInputA = cutlass::bfloat16_t;         // Data type of elements in input tensor A - BF16 for efficiency
+using ElementInputB = cutlass::bfloat16_t;         // Data type of elements in input tensor B - BF16 for efficiency
+using ElementOutput = cutlass::bfloat16_t;         // Data type of elements in output tensor - BF16 to match inputs
 
-using LayoutInputA = cutlass::layout::ColumnMajor;
-using LayoutInputB = cutlass::layout::RowMajor;
-using LayoutOutput = cutlass::layout::ColumnMajor;
-// Layout of the output vector
-using LayoutGemmKReduction = cutlass::layout::PitchLinear;
+// =====================================================================
+// Memory Layout Configuration
+// =====================================================================
+// Define how matrices are stored in memory
+using LayoutInputA = cutlass::layout::ColumnMajor;  // A matrix stored column-major (FORTRAN-style)
+using LayoutInputB = cutlass::layout::RowMajor;     // B matrix stored row-major (C-style)
+using LayoutOutput = cutlass::layout::ColumnMajor;  // Output C matrix stored column-major
+// Layout of the output vector from reduction operation
+using LayoutGemmKReduction = cutlass::layout::PitchLinear;  // Linear layout for reduced vector
 
+// =====================================================================
+// Hardware Architecture Configuration
+// =====================================================================
 // This code section describes whether you want to use tensor cores or regular SIMT cores on GPU SM
-using MMAOp = cutlass::arch::OpClassTensorOp;
+using MMAOp = cutlass::arch::OpClassTensorOp;  // Use Tensor Cores for matrix multiplication
 
 // This code section describes CUDA SM architecture number
-using SmArch = cutlass::arch::Sm80;
+using SmArch = cutlass::arch::Sm80;  // Target Ampere architecture (compute capability 8.0)
 
+// =====================================================================
+// Tile Configuration for Hierarchical Computation
+// =====================================================================
 // This code section describes the tile size a thread block will compute
-using ThreadblockShape = cutlass::gemm::GemmShape<128, 128, 32>;  // Threadblock tile shape
+// Shape: <M, N, K> = <128, 128, 32>
+using ThreadblockShape = cutlass::gemm::GemmShape<128, 128, 32>;  // Each threadblock computes 128x128 output tile
 
 // This code section describes tile size a warp will compute
-using WarpShape = cutlass::gemm::GemmShape<64, 64, 32>;         // Warp tile shape
+// Shape: <M, N, K> = <64, 64, 32>
+using WarpShape = cutlass::gemm::GemmShape<64, 64, 32>;  // Each warp computes 64x64 output tile
 
 // This code section describes the size of MMA op
-using InstructionShape = cutlass::gemm::GemmShape<16, 8, 16>;    // TensorCore instruction shape
+// Shape: <M, N, K> = <16, 8, 16> - Ampere's mma.sync instruction shape
+using InstructionShape = cutlass::gemm::GemmShape<16, 8, 16>;  // Single Tensor Core instruction computes 16x8 output
 
+// =====================================================================
+// Performance Optimization Configuration
+// =====================================================================
 // This code section describes how threadblocks are scheduled on GPU
+// Swizzling improves L2 cache locality by changing threadblock scheduling pattern
 using SwizzleThreadBlock = cutlass::gemm::threadblock::GemmIdentityThreadblockSwizzle<8>;
 
 // Number of pipelines you want to use
-constexpr int NumStages = 4;
+// More stages allow better latency hiding but use more shared memory
+constexpr int NumStages = 4;  // 4-stage pipeline for optimal Ampere performance
 
+// =====================================================================
+// Reduction and Alignment Configuration
+// =====================================================================
 // Reduce A or B operand along the K dimension
+// true: reduces A to produce Mx1 vector (row sums of A)
+// false: reduces B to produce 1xN vector (column sums of B)
 constexpr bool ReduceKForA = true;
 
-// Alignment of A operand
-constexpr int AlignmentA = 8;
+// Memory alignment requirements for vectorized loads
+// 8 elements = 128 bits for BF16 (16 bits per element)
+constexpr int AlignmentA = 8;  // A matrix must be aligned to 8 BF16 elements
+constexpr int AlignmentB = 8;  // B matrix must be aligned to 8 BF16 elements
 
-// Alignment of B operand
-constexpr int AlignmentB = 8;
-
-// This code section describes the epilogue part of the kernel, we use default value
+// =====================================================================
+// Epilogue Configuration
+// =====================================================================
+// This code section describes the epilogue part of the kernel
+// LinearCombination performs: D = alpha * accumulator + beta * C
 using EpilogueOp = cutlass::epilogue::thread::LinearCombination<
-    ElementOutput,                                        // Data type of output matrix.
-    128 / cutlass::sizeof_bits<ElementOutput>::value,     // The number of elements per vectorized.
-                                                          // memory access. This becomes the vector width of
-                                                          // math instructions in the epilogue too.
-    ElementAccumulator,                                   // Data type of accumulator
-    ElementComputeEpilogue>;
+    ElementOutput,                                        // Data type of output matrix (BF16)
+    128 / cutlass::sizeof_bits<ElementOutput>::value,     // Vector width = 128 bits / 16 bits = 8 elements
+                                                          // Determines elements per memory transaction
+    ElementAccumulator,                                   // Data type of accumulator (float)
+    ElementComputeEpilogue>;                             // Data type for epilogue computation (float)
 
+// =====================================================================
+// Main GEMM Kernel with K-Reduction
+// =====================================================================
+// This specialized GEMM kernel performs matrix multiplication while simultaneously
+// reducing one operand along the K dimension
 using Gemm = typename cutlass::gemm::device::GemmWithKReduction<
   ElementInputA, LayoutInputA,
   ElementInputB, LayoutInputB,
@@ -137,7 +188,11 @@ using Gemm = typename cutlass::gemm::device::GemmWithKReduction<
   cutlass::ComplexTransform::kNone
 >;
 
+// =====================================================================
+// Split-K Reduction Configuration
+// =====================================================================
 // Below is the reduction kernel used in the case of parallel split-k
+// Shape<4, 64> means 4 rows and 64 columns per reduction tile
 using ReduceGemmSplitKShape = cutlass::MatrixShape<4, 64>;
 
 using ReduceOp = cutlass::reduction::thread::ReduceAdd<
@@ -176,7 +231,10 @@ using ReduceVectorSplitK = cutlass::reduction::device::ReduceSplitK<ReduceVector
 
 /////////////////////////////////////////////////////////////////////////////////////////////////
 
-// Command line options parsing
+// =====================================================================
+// Command Line Interface
+// =====================================================================
+// Command line options parsing structure
 struct Options {
 
   bool help;
@@ -205,13 +263,12 @@ struct Options {
     beta(-1),
     benchmark(false) { }
 
-  // Verify the problem size is compatible with the CUTLASS Convolution implementation.
+  // Verify the problem size is compatible with the CUTLASS implementation
   bool valid() {
 
-    //
-    // CUTLASS attempts to load 128b vectors of cutlass::half_t (F16) elements. Consequently,
-    // all pointers, strides, and tensor extents must be divisible by 8 elements.
-    //
+    // CUTLASS uses 128-bit vector loads for BF16 elements (16 bits each)
+    // This requires all dimensions to be divisible by 8 elements (128/16 = 8)
+    // Misaligned accesses would cause performance degradation or errors
     int const kAlignment = 8;
 
     if ((problem_size.m() % kAlignment) ||

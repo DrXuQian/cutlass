@@ -433,11 +433,12 @@ int run(Options &options) {
   Result result;
 
   //
-  // Construct events
+  // Performance Measurement Setup
+  // =============================
   //
 
+  // Create CUDA events for accurate GPU timing
   cudaEvent_t events[2];
-
   for (auto & event : events) {
     result.error = cudaEventCreate(&event);
     if (result.error != cudaSuccess) {
@@ -446,7 +447,7 @@ int run(Options &options) {
     }
   }
 
-  // Record an event at the start of a series of GEMMs
+  // Start timing measurement
   result.error = cudaEventRecord(events[0]);
   if (result.error != cudaSuccess) {
     std::cerr << "cudaEventRecord() failed: " << cudaGetErrorString(result.error) << std::endl;
@@ -454,11 +455,13 @@ int run(Options &options) {
   }
 
   //
-  // Run profiling loop
+  // Performance Measurement Loop
+  // ============================
+  // Multiple iterations provide statistical accuracy for timing
   //
 
   for (int iter = 0; iter < options.iterations; ++iter) {
-    // Launch initialized CUTLASS kernel
+    // Execute gather-scatter GEMM kernel
     status = gemm_op();
     CUTLASS_CHECK(status);
   }
@@ -489,44 +492,58 @@ int run(Options &options) {
     return -1;
   }
 
-  // Compute average runtime and GFLOPs.
-  result.runtime_ms = double(runtime_ms) / double(options.iterations);
-  result.gflops = options.gflops(result.runtime_ms / 1000.0);
+  // Calculate performance metrics
+  result.runtime_ms = double(runtime_ms) / double(options.iterations);  // Average time per iteration
+  result.gflops = options.gflops(result.runtime_ms / 1000.0);           // Effective GFLOP/s throughput
 
   // Cleanup
   for (auto event : events) {
     (void)cudaEventDestroy(event);
   }
 
-  std::cout << "Runtime: " << result.runtime_ms << " ms\n";
-  std::cout << " GFLOPs: " << result.gflops << "\n";
+  // Display performance results
+  std::cout << "Average Runtime: " << result.runtime_ms << " ms\n";
+  std::cout << "Throughput: " << result.gflops << " GFLOP/s\n";
+  std::cout << "Effective Sparsity: " << (1.0 - double(options.index_size) / double(options.problem_size.n())) * 100.0 << "%\n";
 
   return 0;
 }
 
+/// Main Entry Point
+/// ================
+/// Validates system requirements and orchestrates the gather-scatter GEMM demonstration
 int main(int argc, const char ** argv) {
   bool notSupported = false;
 
-  // Ampere Tensor Core operations exposed with mma.sync are first available in CUDA 11.0.
   //
-  // CUTLASS must be compiled with CUDA 11 Toolkit to run Conv2dFprop examples.
+  // System Requirements Validation
+  // ==============================
+  //
+
+  // Verify CUDA toolkit version supports Tensor Core operations
   if (!(__CUDACC_VER_MAJOR__ > 11 || (__CUDACC_VER_MAJOR__ == 11 && __CUDACC_VER_MINOR__ >= 0))) {
-    std::cerr << "Ampere Tensor Core operations must be compiled with CUDA 11.0 Toolkit or later." << std::endl;
+    std::cerr << "Gather-Scatter fusion requires CUDA 11.0+ for Tensor Core support." << std::endl;
     notSupported = true;
   }
 
+  // Verify GPU compute capability supports Ampere Tensor Cores
   cudaDeviceProp props;
   CUDA_CHECK(cudaGetDeviceProperties(&props, 0));
 
   if (!(props.major >= 8)) {
-    std::cerr << "Ampere Tensor Ops must be run on a machine with compute capability at least 80."
-              << std::endl;
+    std::cerr << "Gather-Scatter GEMM requires Ampere architecture (compute capability 8.0+)." << std::endl;
     notSupported = true;
   }
 
   if (notSupported) {
+    std::cout << "Skipping execution due to unsupported hardware/software configuration." << std::endl;
     return 0;
   }
+
+  //
+  // Command Line Processing and Execution
+  // =====================================
+  //
 
   Options options;
   options.parse(argc, argv);
@@ -537,9 +554,10 @@ int main(int argc, const char ** argv) {
   }
 
   if (!options.valid()) {
-    std::cerr << "Invalid problem." << "\n";
+    std::cerr << "Invalid problem configuration." << std::endl;
     return -1;
   }
 
+  // Execute the gather-scatter GEMM demonstration
   return run(options);
 }

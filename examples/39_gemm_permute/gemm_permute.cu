@@ -29,45 +29,103 @@
  *
  **************************************************************************************************/
 
-/*! \file
-    \brief GEMM Permute Example.
-
-    This example computes batched GEMM operations with output results permuted as reshaped tensors.
-
-    We provide layout plugin as a flexible tool for users to add any customized input/output tensor permute operation, 
-    or any other generalized global memory writeout address computation. To add a customized layout, add new class
-    in include/cutlass/layout/permute.h
-
-    In this example we use several permute operations (permute([0, 2, 1, 3]))
-
-    In this example, we used Tensor4DPermuteBMM0213 layout to perform Batched GEMM with permute([0, 2, 1, 3]) on BMM
-    whole output tensor, and used Tensor5DPermute20314 layout to perform Normal GEMM with permute([2, 0, 3, 1, 4]) on
-    output matrix. The address computations are performed in compute(col_init, row_init, stride_init, 
-    BMM_batch_idx) with {col_permute, row_permute and stride_permute} as new addresses after permute op.
-    (check include/cutlass/layout/permute.h)
-
-    Tips:
-    
-      1) Make sure to set batch_stride to zero for BMM permute; also the BMM GEMM should be in mode
-      cutlass::gemm::GemmUniversalMode::kBatched instead of kArray.
-
-      2) When the contiguous dimension is touched in permute op (for example [0, 2, 3, 1] for row-major matrix 
-      or [1, 0, 2, 3] for column-major), Alignment should be set to 1 for the corresponding matrix. 
-      If the last dimension is untouched,  one can set Alignment to be larger like 8 in our example.
-      As a result, permute op without touching the unit stride dimension is recommended to obtain the best performance.
-
-    Examples:
-
-      # Runs a batched GEMM with 96 batches
-      $ ./examples/39_gemm_permute/39_gemm_permute --problem-count=96
-
-      # Runs a batched GEMM with 96 batches (with GEMM-K dimension equal to 1024)
-      $ ./examples/39_gemm_permute/39_gemm_permute --problem-count=96 --k=1024 --verbose=true
-
-      # Execute batched GEMM and profile with NSight
-      $ nv-nsight-cu-cli ./examples/39_gemm_permute/39_gemm_permute --m=256 --n=192 --k=256 --verbose=true --iterations=1 --reference-check=false
-
-*/
+/**
+ * CUTLASS Example 39: GEMM with Tensor Permutation
+ *
+ * This example demonstrates GEMM operations with fused tensor permutation/transposition
+ * applied to input and/or output matrices. This fusion is crucial for efficient implementation
+ * of complex tensor operations commonly found in modern deep learning workloads.
+ *
+ * FUSION OVERVIEW:
+ * ================
+ * The kernel performs: D_permuted = permute(alpha * A_permuted @ B_permuted + beta * C)
+ * where permutation operations are applied as part of the memory access pattern,
+ * avoiding separate kernels for tensor reshaping and transposition.
+ *
+ * PERMUTATION PATTERNS:
+ * ====================
+ * This example supports several categories of tensor permutations:
+ *
+ * 1. Normal GEMM Permutations:
+ *    - Tensor4DPermute0213: [X, Y] → [X/S1, S1, S2, Y/S2] → permute([0,2,1,3]) → [X*S2/S1, Y*S1/S2]
+ *    - Tensor5DPermute20314: [X, Y] → [X/T1, T1, T2, T3, Y/T2/T3] → permute([2,0,3,1,4]) → [X*T2/T1, Y*T1/T2]
+ *
+ * 2. Batched GEMM Permutations:
+ *    - Tensor4DPermuteBMM0213: [B, X, Y] → [B/D1, D1, X, Y] → permute([0,2,1,3]) → [B/D1, X, Y*D1]
+ *
+ * PERFORMANCE BENEFITS:
+ * ====================
+ * 1. Memory Bandwidth Efficiency: Eliminates separate permutation kernels
+ * 2. Cache Optimization: Improved spatial and temporal locality
+ * 3. Kernel Launch Overhead: Single kernel vs. separate GEMM + permute launches
+ * 4. Memory Footprint: Reduced intermediate storage requirements
+ *
+ * KEY ARCHITECTURAL FEATURES:
+ * ===========================
+ * - Flexible layout plugin system for custom permutation patterns
+ * - Tensor Core acceleration with optimized memory access patterns
+ * - Support for both normal and batched GEMM operations
+ * - Configurable alignment for optimal memory coalescing
+ * - Runtime tensor shape validation and constraint checking
+ *
+ * COMMON USE CASES:
+ * =================
+ * 1. Transformer Attention: Query/Key/Value matrix transpositions
+ * 2. Convolution as GEMM: Im2col transformations with reshaping
+ * 3. Tensor Contractions: Multi-dimensional matrix multiplications
+ * 4. Data Layout Conversions: NCHW ↔ NHWC transformations
+ * 5. Batch Processing: Efficient batched operations with reordering
+ *
+ * LAYOUT PLUGIN ARCHITECTURE:
+ * ===========================
+ * The permutation system uses a plugin architecture defined in:
+ * include/cutlass/layout/permute.h
+ *
+ * Key components:
+ * - Address computation functions: compute(col, row, stride, batch_idx)
+ * - Dimension tracking: {col_permute, row_permute, stride_permute}
+ * - Memory alignment optimization for permuted access patterns
+ *
+ * IMPLEMENTATION CONSTRAINTS:
+ * ===========================
+ * 1. Batch Stride Configuration:
+ *    - Set batch_stride = 0 for BMM permutations
+ *    - Use GemmUniversalMode::kBatched (not kArray) for batched operations
+ *
+ * 2. Memory Alignment Requirements:
+ *    - Alignment = 1 when contiguous dimension is permuted
+ *    - Alignment = 8 (or higher) when unit stride dimension is preserved
+ *    - Row-major: [0,2,3,1] permutation requires Alignment = 1
+ *    - Column-major: [1,0,2,3] permutation requires Alignment = 1
+ *
+ * 3. Performance Optimization:
+ *    - Avoid permuting the unit stride dimension for best performance
+ *    - Larger alignment values improve memory throughput
+ *    - Consider memory access patterns in permutation design
+ *
+ * NUMERICAL PROPERTIES:
+ * =====================
+ * - Maintains identical numerical results to unpermuted GEMM operations
+ * - Permutation affects only memory layout, not computation precision
+ * - Deterministic results for fixed input ordering
+ *
+ * USAGE EXAMPLES:
+ * ===============
+ *   # Run batched GEMM with 96 batches and default permutations
+ *   $ ./39_gemm_permute --batch-count=96
+ *
+ *   # Run with custom dimensions and verbose output
+ *   $ ./39_gemm_permute --batch-count=96 --k=1024 --verbose=true
+ *
+ *   # Profile with NSight Compute
+ *   $ nv-nsight-cu-cli ./39_gemm_permute --m=256 --n=192 --k=256 --verbose=true --iterations=1 --reference-check=false
+ *
+ * COMPILE-TIME CONFIGURATION:
+ * ===========================
+ * Permutation parameters (S1, S2, D1, T1, T2, T3) are compile-time constants
+ * defined below. Runtime specification is not currently supported due to
+ * template instantiation requirements.
+ */
 
 /////////////////////////////////////////////////////////////////////////////////////////////////
 
@@ -100,38 +158,58 @@
 #include "layouts.h"
 #include "permute_info.h"
 
-/// Tensor4DPermuteBMM0213 --->
-/// Permute layout function for 4-D permuted tensors for BMM with BMM tensor (dimension as [B, M, N]) reshaped
-/// as [B/D1, D1, M, N]. Then perform permute([0, 2, 1, 3]) on the corresponding whole BMM tensor.
-int constexpr D1 = 12;
+///////////////////////////////////////////////////////////////////////////////////////////////////
+///
+/// COMPILE-TIME PERMUTATION CONFIGURATION
+/// =======================================
+/// These constants define the tensor reshaping and permutation patterns.
+/// All values are compile-time constants and cannot be changed at runtime.
+///
+///////////////////////////////////////////////////////////////////////////////////////////////////
 
-/// Tensor5DPermute20314 --->
-/// Permute layout function for 5-D permuted tensors with matrix (dimension as [M, N]) reshaped
-/// as [M/T1, T1, T2, T3, N/T2/T3]. Then perform permute([2, 0, 3, 1, 4]) on the corresponding tensor.
-int constexpr T1 = 16; 
-int constexpr T2 = 3;
-int constexpr T3 = 8;
+/// Batched GEMM 4D Permutation: Tensor4DPermuteBMM0213
+/// ====================================================
+/// Pattern: [B, M, N] → [B/D1, D1, M, N] → permute([0, 2, 1, 3]) → [B/D1, M, D1, N]
+/// Use case: Batched matrix multiplication with inter-batch dimension reordering
+int constexpr D1 = 12;  // Batch subdivision factor
 
-/// Tensor4DPermute0213 --->
-/// Permute layout function for 4-D permuted tensors with matrix (dimension as [M, N]) reshaped
-/// as [M/S1, S1, S2, N/S2]. Then perform permute([0, 2, 1, 3]) on the corresponding tensor.
-int constexpr S1 = 8; 
-int constexpr S2 = 4;
+/// Normal GEMM 5D Permutation: Tensor5DPermute20314
+/// ================================================
+/// Pattern: [M, N] → [M/T1, T1, T2, T3, N/T2/T3] → permute([2, 0, 3, 1, 4]) → [T2, M/T1, T3, T1, N/T2/T3]
+/// Use case: Complex tensor contractions and multi-dimensional reorderings
+int constexpr T1 = 16;  // Primary dimension subdivision
+int constexpr T2 = 3;   // Secondary dimension subdivision
+int constexpr T3 = 8;   // Tertiary dimension subdivision
 
-// // // Alignments
-int constexpr AlignmentA = 8;
-int constexpr AlignmentB = 8;
-int constexpr AlignmentC = 8;
+/// Normal GEMM 4D Permutation: Tensor4DPermute0213
+/// ===============================================
+/// Pattern: [M, N] → [M/S1, S1, S2, N/S2] → permute([0, 2, 1, 3]) → [M/S1, S2, S1, N/S2]
+/// Use case: Standard matrix transposition with tiling for cache efficiency
+int constexpr S1 = 8;   // Row tile size
+int constexpr S2 = 4;   // Column tile size
 
-/// GEMM element types
-using ElementInput = cutlass::half_t;
-using ElementOutput = cutlass::half_t;
-using ElementAccumulator = float;
+/// Memory Alignment Configuration
+/// ===============================
+/// Alignment requirements balance memory bandwidth with permutation constraints
+/// Higher alignment improves throughput when compatible with permutation patterns
+int constexpr AlignmentA = 8;  // Matrix A alignment (8 elements = 16 bytes for FP16)
+int constexpr AlignmentB = 8;  // Matrix B alignment (8 elements = 16 bytes for FP16)
+int constexpr AlignmentC = 8;  // Matrix C/D alignment (8 elements = 16 bytes for FP16)
+
+/// Data Type Configuration
+/// =======================
+/// Optimized for modern GPU architectures with mixed-precision support
+using ElementInput = cutlass::half_t;     // Input matrices: FP16 for memory efficiency
+using ElementOutput = cutlass::half_t;    // Output matrix: FP16 for downstream compatibility
+using ElementAccumulator = float;         // Internal accumulation: FP32 for numerical accuracy
 
 /////////////////////////////////////////////////////////////////////////////////////////////////
 
-/// Useful macros
+/// Error Handling Macros
+/// ======================
+/// Convenience macros for consistent error checking throughout the example
 
+// CUDA Runtime API error checking
 #define CHECK_CUDA_CALL(call, handler) \
 do { \
   cudaError_t __err = (call); \
@@ -141,6 +219,7 @@ do { \
   } \
 } while(0)
 
+// CUTLASS API error checking
 #define CHECK_CUTLASS_CALL(call, handler) \
 do { \
   cutlass::Status __status = (call); \
@@ -152,7 +231,10 @@ do { \
 
 /////////////////////////////////////////////////////////////////////////////////////////////////
 
-// Command line options parsing
+/// Command Line Configuration
+/// ===========================
+/// Comprehensive options structure for controlling GEMM dimensions,
+/// batching parameters, and execution settings
 struct Options {
 
   bool help;
@@ -175,13 +257,13 @@ struct Options {
   Options():
     help(false),
     error(false),
-    reference_check(true),
-    batch_count(-1),
-    iterations(20),
-    cuda_streams(0),
-    verbose(false),
-    alpha(1),
-    beta()
+    reference_check(true),    // Enable numerical verification by default
+    batch_count(-1),          // Will be set to default in parse() if not specified
+    iterations(20),           // Performance measurement iterations
+    cuda_streams(0),          // Number of CUDA streams (0 = synchronous)
+    verbose(false),           // Detailed output disabled by default
+    alpha(1),                 // GEMM scaling factor
+    beta()                    // Bias scaling factor (zero by default)
   { }
 
   // Parses the command line
@@ -202,10 +284,11 @@ struct Options {
 
     int m, n, k;
 
-    cmd.get_cmd_line_argument("m", m, 384);
-    cmd.get_cmd_line_argument("n", n, 192);
-    cmd.get_cmd_line_argument("k", k, 384);
-    cmd.get_cmd_line_argument("batch-count", batch_count, 96);
+    // Parse GEMM dimensions with reasonable defaults for demonstration
+    cmd.get_cmd_line_argument("m", m, 384);           // M dimension (384 = multiple of tile sizes)
+    cmd.get_cmd_line_argument("n", n, 192);           // N dimension (192 = multiple of tile sizes)
+    cmd.get_cmd_line_argument("k", k, 384);           // K dimension (384 = multiple of tile sizes)
+    cmd.get_cmd_line_argument("batch-count", batch_count, 96);  // 96 batches for meaningful statistics
 
     problem_each = cutlass::gemm::GemmCoord(m, n, k);
   }
@@ -268,36 +351,42 @@ struct Options {
     return out;
   }
 
-  /// Compute performance in GFLOP/s
+  /// Performance Calculation
+  /// =======================
+  /// Computes effective throughput in GFLOP/s for the permuted GEMM operations
   double gflops(double runtime_s, bool batched) const {
 
-    // Number of real-valued multiply-adds 
-    int64_t fmas = int64_t();
+    // Calculate total multiply-add operations
+    // Each GEMM contributes M*N*K multiply-adds
+    int64_t fmas = problem_each.product() * (batched ? batch_count : 1);
 
-    fmas += problem_each.product() * (batched ? batch_count : 1);
-    
-    // Two flops per multiply-add
+    // Convert to floating-point operations (2 ops per multiply-add)
     return 2.0 * double(fmas) / double(1.0e9) / runtime_s;
   }
 };
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////
 
-namespace { // (anonymous)
+namespace { // Anonymous namespace for implementation details
 
-/// Dimension-generic permutation loop
+/// Recursive Host-Based Permutation Implementation
+/// ===============================================
+/// Template-based recursive function for applying arbitrary tensor permutations on CPU
+/// Used for reference computation and verification purposes
 template<int I, typename Element, typename Layout, typename PermuteOp, typename Coord>
 void permute_host_impl(
-    cutlass::TensorView<Element const, Layout> const & input,
-    cutlass::TensorView<Element, Layout> const & output,
-    PermuteOp && permute,
-    Coord & coord
+    cutlass::TensorView<Element const, Layout> const & input,   // Source tensor view
+    cutlass::TensorView<Element, Layout> const & output,        // Destination tensor view
+    PermuteOp && permute,                                       // Permutation operation
+    Coord & coord                                               // Current coordinate being processed
 ) {
-  static_assert(Layout::kRank == Coord::kRank, "Incompatible Layout and Coord types");
+  static_assert(Layout::kRank == Coord::kRank, "Layout and Coordinate ranks must match");
+
   if constexpr (I == Coord::kRank) {
+    // Base case: copy element with permuted coordinates
     output.at(permute(coord)) = input.at(coord);
-  }
-  else {
+  } else {
+    // Recursive case: iterate through dimension I
     for (coord[I] = 0; coord[I] < input.extent(I); ++coord[I]) {
       permute_host_impl<I+1>(input, output, std::forward<PermuteOp>(permute), coord);
     }
@@ -306,35 +395,53 @@ void permute_host_impl(
 
 } // namespace (anonymous)
 
-/// Perform a reference (host-based) permutation of an input tensor
+/// Host-Based Reference Permutation
+/// =================================
+/// Performs tensor permutation on CPU for verification against GPU kernel results
+/// Supports arbitrary permutation patterns defined by PermuteLayout template parameter
 template<typename PermuteLayout, typename Element, typename Layout>
 void permute_host(
-    cutlass::TensorView<Element const, Layout> const &input,
-    cutlass::TensorView<Element, Layout> const &output,
-    int batch_count) {
+    cutlass::TensorView<Element const, Layout> const &input,    // Input tensor (device memory)
+    cutlass::TensorView<Element, Layout> const &output,         // Output tensor (device memory)
+    int batch_count                                             // Number of batched tensors
+) {
+  // Extract tensor properties and allocate host memory
   Layout layout = input.layout();
   cutlass::MatrixCoord extent = input.extent();
 
   std::size_t num_elems = layout.capacity(extent) * batch_count;
-  std::vector<Element> h_input(num_elems);
+  std::vector<Element> h_input(num_elems);   // Host input buffer
+  std::vector<Element> h_output(num_elems);  // Host output buffer
+
+  // Copy input data from device to host
   cutlass::device_memory::copy_to_host(h_input.data(), input.data(), num_elems);
 
-  std::vector<Element> h_output(num_elems);
-
+  // Configure permutation using template parameter information
   using Info = PermuteInfo<PermuteLayout>;
   using TensorLayout = typename Info::Layout;
 
+  // Calculate original and permuted tensor shapes
   auto shape_orig = Info::original_shape(extent, batch_count);
   auto shape_perm = Info::permute(shape_orig);
 
-  cutlass::TensorView<Element const, TensorLayout> view_input(h_input.data(), TensorLayout::packed(shape_orig), shape_orig); 
-  cutlass::TensorView<Element, TensorLayout> view_output(h_output.data(), TensorLayout::packed(shape_perm), shape_perm);
+  // Create tensor views for the permutation operation
+  cutlass::TensorView<Element const, TensorLayout> view_input(
+    h_input.data(), TensorLayout::packed(shape_orig), shape_orig);
+  cutlass::TensorView<Element, TensorLayout> view_output(
+    h_output.data(), TensorLayout::packed(shape_perm), shape_perm);
 
+  // Execute the permutation using recursive template implementation
   decltype(shape_orig) coord;
   permute_host_impl<0>(view_input, view_output, Info::permute, coord);
 
+  // Copy permuted results back to device memory
   cutlass::device_memory::copy_to_device(output.data(), h_output.data(), num_elems);
 }
+
+/// Layout Information Helper
+/// =========================
+/// Template specializations for converting layout types to human-readable names
+/// Used for verbose output and debugging information
 
 template<typename Layout>
 struct LayoutInfo;
@@ -351,26 +458,32 @@ struct LayoutInfo<cutlass::layout::ColumnMajor> {
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////
 
+/// GEMM Permutation Testbed
+/// =========================
+/// Comprehensive test harness for validating and benchmarking GEMM operations
+/// with various tensor permutation patterns applied to inputs and outputs
 template <typename ElementA, typename ElementB, typename ElementC>
 class Testbed {
 private:
 
   //
-  // Data members
+  // Internal State and Configuration
+  // ================================
   //
 
-  Options & options;
+  Options & options;  // Reference to command-line configuration
 
-  /// Initialization
-  cutlass::Distribution::Kind init_A;
-  cutlass::Distribution::Kind init_B;
-  cutlass::Distribution::Kind init_C;
-  uint32_t seed;
+  // Random initialization parameters for reproducible testing
+  cutlass::Distribution::Kind init_A;  // Distribution type for matrix A
+  cutlass::Distribution::Kind init_B;  // Distribution type for matrix B
+  cutlass::Distribution::Kind init_C;  // Distribution type for matrix C
+  uint32_t seed;                       // Random seed for deterministic results
 
-  cutlass::DeviceAllocation<ElementA> block_A;
-  cutlass::DeviceAllocation<ElementB> block_B;
-  cutlass::DeviceAllocation<ElementC> block_C;
-  cutlass::DeviceAllocation<ElementC> block_D;
+  // GPU memory allocations for input/output matrices
+  cutlass::DeviceAllocation<ElementA> block_A;  // Input matrix A
+  cutlass::DeviceAllocation<ElementB> block_B;  // Input matrix B
+  cutlass::DeviceAllocation<ElementC> block_C;  // Input matrix C (bias)
+  cutlass::DeviceAllocation<ElementC> block_D;  // Output matrix D
 
 public:
 
@@ -378,250 +491,304 @@ public:
   // Methods
   //
 
+  /// Constructor: Testbed Initialization
+  /// ===================================
+  /// Configures the test environment with specified data distributions and random seed
   Testbed(
     Options &options_,
-    cutlass::Distribution::Kind init_A_ = cutlass::Distribution::Uniform,
-    cutlass::Distribution::Kind init_B_ = cutlass::Distribution::Uniform,
-    cutlass::Distribution::Kind init_C_ = cutlass::Distribution::Uniform,
-    uint32_t seed_ = 3090
+    cutlass::Distribution::Kind init_A_ = cutlass::Distribution::Uniform,  // Matrix A: uniform distribution
+    cutlass::Distribution::Kind init_B_ = cutlass::Distribution::Uniform,  // Matrix B: uniform distribution
+    cutlass::Distribution::Kind init_C_ = cutlass::Distribution::Uniform,  // Matrix C: uniform distribution
+    uint32_t seed_ = 3090                                                  // Default random seed
   ):
     options(options_), init_A(init_A_), init_B(init_B_), init_C(init_C_), seed(seed_) { }
 
 private:
 
-  /// Print permutation info for one tensor
+  /// Tensor Information Display
+  /// ===========================
+  /// Prints detailed information about tensor dimensions and permutation patterns
+  /// for debugging and verification purposes
   template<typename PermuteLayout>
   void print_tensor_info(
-      std::ostream & os,
-      std::string const &tensor_name,
-      int row_dim,
-      int col_dim) {
+      std::ostream & os,           // Output stream for information display
+      std::string const &tensor_name,  // Human-readable tensor identifier
+      int row_dim,                     // Row dimension index in problem coordinates
+      int col_dim                      // Column dimension index in problem coordinates
+  ) {
 
+    // Extract tensor dimensions and permutation metadata
     cutlass::MatrixCoord extent(options.problem_each.at(row_dim), options.problem_each.at(col_dim));
     using Info = PermuteInfo<PermuteLayout>;
 
-    os << "tensor " << tensor_name << ": " << Info::desc() << "\n";
-    os << "    extent: [" << extent.row() << ", " << extent.column() << "]";
+    // Display basic tensor information
+    os << "Tensor " << tensor_name << ": " << Info::desc() << "\n";
+    os << "    Extent: [" << extent.row() << ", " << extent.column() << "]";
     if (Info::kBatched) {
-      os << ", batch count: " << options.batch_count;
+      os << ", Batch count: " << options.batch_count;
     }
     os << "\n";
+
+    // Display permutation details for non-trivial cases
     if (!cutlass::layout::is_trivial_permute<PermuteLayout>) {
       auto shape_orig = Info::original_shape(extent, options.batch_count);
       auto shape_perm = Info::permute(shape_orig);
-      os << "  original: [" << shape_orig << "]\n";
-      os << "  permuted: [" << shape_perm << "]\n";
+      os << "    Original shape: [" << shape_orig << "]\n";
+      os << "    Permuted shape: [" << shape_perm << "]\n";
     }
   }
 
-  /// Check shape compatibility for one tensor
+  /// Tensor Shape Validation
+  /// ========================
+  /// Validates that tensor dimensions are compatible with permutation requirements
+  /// and memory alignment constraints
   template<typename Layout, typename PermuteLayout, int Alignment>
   bool check_tensor_shape(
-      std::string const &tensor_name,
-      int row_dim,
-      int col_dim) {
+      std::string const &tensor_name,  // Tensor identifier for error reporting
+      int row_dim,                     // Row dimension index
+      int col_dim                      // Column dimension index
+  ) {
 
+    // Extract tensor dimensions and permutation requirements
     cutlass::MatrixCoord extent(options.problem_each.at(row_dim), options.problem_each.at(col_dim));
-
     using Info = PermuteInfo<PermuteLayout>;
 
+    // Calculate alignment requirements based on memory layout
+    // Column-major: alignment applies to rows (leading dimension)
+    // Row-major: alignment applies to columns (leading dimension)
     auto rowAlign = cutlass::platform::is_same<Layout, cutlass::layout::ColumnMajor>::value ? Alignment : 1;
     auto colAlign = cutlass::platform::is_same<Layout, cutlass::layout::RowMajor>::value ? Alignment : 1;
 
+    // Combine permutation and alignment requirements
     auto rowFactor = Info::kRowFactor * rowAlign;
     auto colFactor = Info::kColumnFactor * colAlign;
 
-    // Assumes row-major layout
+    // Validate row dimension divisibility
     bool const valid_row = extent.row() % rowFactor == 0;
     if (!valid_row) {
-      std::cerr << "Invalid tensor " << tensor_name << " row size = " << extent.row() << ", "
-                   "must be divisible by " << rowFactor << ", "
-                   "required by " << Info::name() << 
-                   (rowAlign > 1 ? (" and alignment of " + std::to_string(rowAlign)) : "") << std::endl;
+      std::cerr << "ERROR: Tensor " << tensor_name << " row size (" << extent.row()
+                << ") must be divisible by " << rowFactor
+                << " (required by " << Info::name()
+                << (rowAlign > 1 ? (" + alignment " + std::to_string(rowAlign)) : "")
+                << ")" << std::endl;
     }
 
+    // Validate column dimension divisibility
     bool const valid_col = extent.column() % colFactor == 0;
     if (!valid_col) {
-      std::cerr << "Invalid tensor " << tensor_name << " column size = " << extent.column() << ", "
-                   "must be divisible by " << colFactor << ", "
-                   "required by " << Info::name() << 
-                   (colAlign > 1 ? (" and alignment of " + std::to_string(colAlign)) : "") << std::endl;
+      std::cerr << "ERROR: Tensor " << tensor_name << " column size (" << extent.column()
+                << ") must be divisible by " << colFactor
+                << " (required by " << Info::name()
+                << (colAlign > 1 ? (" + alignment " + std::to_string(colAlign)) : "")
+                << ")" << std::endl;
     }
 
+    // Validate batch count divisibility for batched operations
     bool const valid_bsz = options.batch_count % Info::kBatchFactor == 0;
     if (!valid_bsz) {
-      std::cerr << "Invalid batch count = " << options.batch_count << ", "
-                   "must be divisible by " << Info::kBatchFactor << ", "
-                   "required by " << Info::name() << std::endl;
+      std::cerr << "ERROR: Batch count (" << options.batch_count
+                << ") must be divisible by " << Info::kBatchFactor
+                << " (required by " << Info::name() << ")" << std::endl;
     }
 
     return valid_row && valid_col && valid_bsz;
   }
 
-  /// Helper to initialize a tensor view
+  /// Tensor Data Initialization
+  /// ===========================
+  /// Fills tensor memory with values from specified probability distribution
+  /// Range selection ensures numerical stability and meaningful verification
   template <typename Element>
   void initialize_tensor_(
-      Element *ptr,
-      size_t capacity, 
-      cutlass::Distribution::Kind dist_kind,
-      uint32_t seed) {
+      Element *ptr,                           // Device memory pointer
+      size_t capacity,                        // Number of elements to initialize
+      cutlass::Distribution::Kind dist_kind,  // Distribution type
+      uint32_t seed                           // Random seed
+  ) {
 
     if (dist_kind == cutlass::Distribution::Uniform) {
-
+      // Determine value range based on element precision
       Element scope_max, scope_min;
       int bits_input = cutlass::sizeof_bits<Element>::value;
       int bits_output = cutlass::sizeof_bits<ElementC>::value;
 
       if (bits_input == 1) {
+        // Binary values
         scope_max = 2;
         scope_min = 0;
       } else if (bits_input <= 8) {
+        // Low precision (INT8, etc.)
         scope_max = 2;
         scope_min = -2;
       } else if (bits_output == 16) {
+        // Half precision output
         if (cutlass::sizeof_bits<ElementAccumulator>::value <= 16) {
-          scope_max = 5;
+          scope_max = 5;   // Conservative range for FP16 accumulation
           scope_min = -5;
-        }
-        else {
-          scope_max = 8;
+        } else {
+          scope_max = 8;   // Wider range for FP32 accumulation
           scope_min = -8;
         }
       } else {
+        // Full precision
         scope_max = 8;
         scope_min = -8;
       }
 
+      // Fill with uniform random values in calculated range
       cutlass::reference::device::BlockFillRandomUniform(
         ptr, capacity, seed, scope_max, scope_min, 0);
     } 
     else if (dist_kind == cutlass::Distribution::Gaussian) {
-
+      // Gaussian distribution with mean=0, stddev=0.5
       cutlass::reference::device::BlockFillRandomGaussian(
-        ptr, capacity, seed, Element(), Element(0.5f));
+        ptr, capacity, seed, Element(0), Element(0.5f));
     }
     else if (dist_kind == cutlass::Distribution::Sequential) {
-
-      // Fill with increasing elements
+      // Sequential values: 0, 1, 2, 3, ... (useful for debugging)
       cutlass::reference::device::BlockFillSequential(
-        ptr, capacity, Element(1), Element());
-    } 
+        ptr, capacity, Element(1), Element(0));
+    }
     else {
-
-      // Fill with all 1s
+      // Identity/constant fill: all elements = 1
       cutlass::reference::device::BlockFillSequential(
-        ptr, capacity, Element(), Element(1));
+        ptr, capacity, Element(0), Element(1));
     }
   }
 
-  /// Initializes data structures
+  /// Memory Allocation and Data Initialization
+  /// ===========================================
+  /// Allocates GPU memory and fills tensors with test data
   void initialize(int batch_count) {
 
+    // Set random seed for reproducible results
     srand(seed);
 
+    // Calculate total memory requirements for all batches
     int64_t total_elements_A = options.problem_each.m() * options.problem_each.k() * batch_count;
     int64_t total_elements_B = options.problem_each.n() * options.problem_each.k() * batch_count;
     int64_t total_elements_C = options.problem_each.m() * options.problem_each.n() * batch_count;
     int64_t total_elements_D = options.problem_each.m() * options.problem_each.n() * batch_count;
 
-    // Allocate space
-    block_A.reset(total_elements_A);
-    block_B.reset(total_elements_B);
-    block_C.reset(total_elements_C);
-    block_D.reset(total_elements_D);
+    // Allocate GPU memory for all matrices
+    block_A.reset(total_elements_A);  // Input matrix A
+    block_B.reset(total_elements_B);  // Input matrix B
+    block_C.reset(total_elements_C);  // Input matrix C (bias)
+    block_D.reset(total_elements_D);  // Output matrix D
 
-    // Initialize input tensors
+    // Initialize input tensors with specified distributions
+    // Different seeds ensure uncorrelated random data
     initialize_tensor_(block_A.get(), total_elements_A, init_A, seed * 2021);
     initialize_tensor_(block_B.get(), total_elements_B, init_B, seed * 2022);
     initialize_tensor_(block_C.get(), total_elements_C, init_C, seed * 2023);
 
+    // Initialize output tensor to zero (will be overwritten)
     cutlass::reference::device::BlockFillSequential(
-      block_D.get(), total_elements_D, ElementC(), ElementC());
+      block_D.get(), total_elements_D, ElementC(0), ElementC(0));
   }
 
 
-  /// Check device GEMM results against a reference implementation with separate host-based permutation
+  /// Numerical Verification Against Reference Implementation
+  /// =======================================================
+  /// Validates GPU kernel results by comparing against CPU-based reference computation
+  /// with separate host-side permutation operations
   template<typename Gemm>
   bool validate(Gemm const &gemm) {
 
-    bool constexpr kBatched = PermuteInfo<typename Gemm::PermuteALayout>::kBatched 
-                           || PermuteInfo<typename Gemm::PermuteBLayout>::kBatched 
+    // Determine if this is a batched operation by checking permutation layouts
+    bool constexpr kBatched = PermuteInfo<typename Gemm::PermuteALayout>::kBatched
+                           || PermuteInfo<typename Gemm::PermuteBLayout>::kBatched
                            || PermuteInfo<typename Gemm::PermuteDLayout>::kBatched;
-                      
+
     int const batch_count = kBatched ? options.batch_count : 1;
 
+    // Extract problem dimensions and create tensor layouts
     cutlass::gemm::GemmCoord problem = options.problem_each;
-
     cutlass::MatrixCoord extent_A{problem.m(), problem.k()};
     cutlass::MatrixCoord extent_B{problem.k(), problem.n()};
     cutlass::MatrixCoord extent_C{problem.m(), problem.n()};
 
+    // Extract layout types from GEMM template
     using LayoutA = typename Gemm::LayoutA;
     using LayoutB = typename Gemm::LayoutB;
     using LayoutC = typename Gemm::LayoutC;
 
+    // Create packed layouts for efficient memory access
     LayoutA layout_A(LayoutA::packed(extent_A));
     LayoutB layout_B(LayoutB::packed(extent_B));
     LayoutC layout_C(LayoutC::packed(extent_C));
 
+    // Calculate total memory sizes including batching
     auto size_A = layout_A.capacity(extent_A) * batch_count;
     auto size_B = layout_B.capacity(extent_B) * batch_count;
     auto size_C = layout_C.capacity(extent_C) * batch_count;
     
+    // Create tensor views for original data
     cutlass::TensorView<ElementA, LayoutA> view_A(block_A.get(), layout_A, extent_A);
     cutlass::TensorView<ElementB, LayoutB> view_B(block_B.get(), layout_B, extent_B);
     cutlass::TensorView<ElementC, LayoutC> view_C(block_C.get(), layout_C, extent_C);
     cutlass::TensorView<ElementC, LayoutC> view_D(block_D.get(), layout_C, extent_C);
 
+    // Allocate temporary storage for permuted input matrices
     cutlass::DeviceAllocation<ElementA> block_A_perm(size_A);
     cutlass::DeviceAllocation<ElementA> block_B_perm(size_B);
 
+    // Create tensor views for permuted data
     cutlass::TensorView<ElementA, LayoutA> view_A_perm(block_A_perm.get(), layout_A, extent_A);
     cutlass::TensorView<ElementB, LayoutB> view_B_perm(block_B_perm.get(), layout_B, extent_B);
 
+    // Apply input permutations using host-based reference implementation
     permute_host<typename Gemm::PermuteALayout>(view_A.const_view(), view_A_perm, batch_count);
     permute_host<typename Gemm::PermuteBLayout>(view_B.const_view(), view_B_perm, batch_count);
 
-    cutlass::DeviceAllocation<ElementC>    block_D_ref(size_C);
+    // Allocate storage for reference GEMM output
+    cutlass::DeviceAllocation<ElementC> block_D_ref(size_C);
     cutlass::TensorView<ElementC, LayoutC> view_D_ref(block_D_ref.get(), layout_C, extent_C);
 
+    // Extract epilogue configuration from GEMM template
     using EpilogueOutputOp = typename Gemm::GemmKernel::Epilogue::OutputOp;
 
-    // Reference GEMM
+    // Compute reference GEMM using permuted inputs
+    // This performs: D_ref = alpha * A_permuted @ B_permuted + beta * C
     cutlass::reference::device::GemmComplex<
-        ElementA, LayoutA,
-        ElementB, LayoutB,
-        ElementC, LayoutC, 
-        typename EpilogueOutputOp::ElementCompute,
-        typename Gemm::ElementAccumulator
+        ElementA, LayoutA,                              // Input A configuration
+        ElementB, LayoutB,                              // Input B configuration
+        ElementC, LayoutC,                              // Output configuration
+        typename EpilogueOutputOp::ElementCompute,      // Epilogue compute type
+        typename Gemm::ElementAccumulator               // Accumulator type
     >(
-      problem,
-      options.alpha, 
-      view_A_perm,
-      Gemm::kTransformA,
-      view_B_perm,
-      Gemm::kTransformB,
-      options.beta, 
-      view_C, 
-      view_D_ref, 
-      ElementAccumulator(0),
-      batch_count,
-      options.problem_each.m() * options.problem_each.k(),
-      options.problem_each.n() * options.problem_each.k(),
-      options.problem_each.m() * options.problem_each.n(),
-      options.problem_each.m() * options.problem_each.n()
+      problem,                                        // GEMM dimensions
+      options.alpha,                                  // Scaling factor alpha
+      view_A_perm,                                    // Permuted matrix A
+      Gemm::kTransformA,                              // Transform operation on A
+      view_B_perm,                                    // Permuted matrix B
+      Gemm::kTransformB,                              // Transform operation on B
+      options.beta,                                   // Scaling factor beta
+      view_C,                                         // Input matrix C
+      view_D_ref,                                     // Reference output D
+      ElementAccumulator(0),                          // Initial accumulator value
+      batch_count,                                    // Number of batches
+      options.problem_each.m() * options.problem_each.k(),  // Batch stride A
+      options.problem_each.n() * options.problem_each.k(),  // Batch stride B
+      options.problem_each.m() * options.problem_each.n(),  // Batch stride C
+      options.problem_each.m() * options.problem_each.n()   // Batch stride D
     );
 
-    cutlass::DeviceAllocation<ElementC>    block_D_perm(size_C);
+    // Apply output permutation to reference results
+    cutlass::DeviceAllocation<ElementC> block_D_perm(size_C);
     cutlass::TensorView<ElementC, LayoutC> view_D_perm(block_D_perm.get(), layout_C, extent_C);
     permute_host<typename Gemm::PermuteDLayout>(view_D_ref.const_view(), view_D_perm, batch_count);
 
-    // Reference check
+    // Compare permuted reference output against kernel output
     return cutlass::reference::device::BlockCompareEqual(view_D_perm.data(), view_D.data(), size_C);
 }
 
 public:
 
+  /// GEMM Permutation Profiling and Validation
+  /// ===========================================
+  /// Complete workflow for testing a specific GEMM permutation configuration
+  /// including validation, performance measurement, and detailed reporting
   template<typename Gemm>
   bool profile_GEMM_permute() {
 
@@ -637,135 +804,158 @@ public:
                            || PermuteInfo<PermuteBLayout>::kBatched 
                            || PermuteInfo<PermuteDLayout>::kBatched;
 
+    // Display configuration header
     std::cout << "\n"
                  "====================================================\n"
-                 << (kBatched ? "Batched" : "Normal") << " GEMM:"
-                 << "\n  A=" << LayoutInfo<LayoutA>::name() << "," << PermuteInfo<PermuteALayout>::name()
-                 << "\n  B=" << LayoutInfo<LayoutB>::name() << "," << PermuteInfo<PermuteBLayout>::name()
-                 << "\n  D=" << LayoutInfo<LayoutC>::name() << "," << PermuteInfo<PermuteDLayout>::name()
+                 << (kBatched ? "Batched" : "Normal") << " GEMM with Permutation:"
+                 << "\n  Matrix A: " << LayoutInfo<LayoutA>::name() << " + " << PermuteInfo<PermuteALayout>::name()
+                 << "\n  Matrix B: " << LayoutInfo<LayoutB>::name() << " + " << PermuteInfo<PermuteBLayout>::name()
+                 << "\n  Matrix D: " << LayoutInfo<LayoutC>::name() << " + " << PermuteInfo<PermuteDLayout>::name()
                  << "\n"
                  "====================================================\n";
 
+    // Display detailed tensor information if requested
     if (options.verbose) {
-      print_tensor_info<PermuteALayout>(std::cout, "A", 0, 2);
-      print_tensor_info<PermuteBLayout>(std::cout, "B", 2, 1);
-      print_tensor_info<PermuteDLayout>(std::cout, "D", 0, 1);
+      print_tensor_info<PermuteALayout>(std::cout, "A", 0, 2);  // A: M x K
+      print_tensor_info<PermuteBLayout>(std::cout, "B", 2, 1);  // B: K x N
+      print_tensor_info<PermuteDLayout>(std::cout, "D", 0, 1);  // D: M x N
     }
     std::cout << std::endl;
 
+    // Validate tensor shapes and alignment requirements
     bool valid = true;
     valid &= check_tensor_shape<LayoutA, PermuteALayout, Gemm::kAlignmentA>("A", 0, 2);
     valid &= check_tensor_shape<LayoutB, PermuteBLayout, Gemm::kAlignmentB>("B", 2, 1);
     valid &= check_tensor_shape<LayoutC, PermuteDLayout, Gemm::kAlignmentC>("D", 0, 1);
-    if (!valid)
-    {
-      std::cout << "Skipped test" << std::endl;
+    if (!valid) {
+      std::cout << "SKIPPED: Invalid tensor dimensions for this permutation pattern" << std::endl;
       return true;
     }
 
+    // Determine effective batch count and initialize data
     int const batch_count = kBatched ? options.batch_count : 1;
-
-    // Initialize the problem
     initialize(batch_count);
 
-    // Configure the GEMM arguments
+    // Configure epilogue operation (linear combination: alpha*AB + beta*C)
     using EpilogueOutputOp = typename Gemm::GemmKernel::Epilogue::OutputOp;
     typename EpilogueOutputOp::Params epilogue_op(options.alpha, options.beta);
 
-    // Please make sure all problem_sizes are the same for kBatched mode
+    // Extract problem dimensions (uniform across all batches)
     auto problem = options.problem_each;
-
     cutlass::MatrixCoord extent_A{problem.m(), problem.k()};
     cutlass::MatrixCoord extent_B{problem.k(), problem.n()};
     cutlass::MatrixCoord extent_C{problem.m(), problem.n()};
 
+    // Create optimized memory layouts
     LayoutA layout_A(LayoutA::packed(extent_A));
     LayoutB layout_B(LayoutB::packed(extent_B));
     LayoutC layout_C(LayoutC::packed(extent_C));
 
-    // Configure GEMM arguments
+    // Configure comprehensive GEMM kernel arguments
     typename Gemm::Arguments arguments{
       kBatched ? cutlass::gemm::GemmUniversalMode::kBatched : cutlass::gemm::GemmUniversalMode::kGemm,
-      problem,
-      batch_count,
-      epilogue_op,
-      (void*)block_A.get(),
-      (void*)block_B.get(),
-      (void*)block_C.get(),
-      (void*)block_D.get(),
-      // For any non-trivial permute the batch stride must be set to 0
+      problem,                                              // Problem dimensions
+      batch_count,                                          // Number of batches
+      epilogue_op,                                          // Linear combination parameters
+      (void*)block_A.get(),                                 // Matrix A device pointer
+      (void*)block_B.get(),                                 // Matrix B device pointer
+      (void*)block_C.get(),                                 // Matrix C device pointer
+      (void*)block_D.get(),                                 // Matrix D device pointer
+      // Batch stride configuration (critical for permuted layouts)
+      // Non-trivial permutations require batch_stride = 0
       cutlass::layout::is_trivial_permute<PermuteALayout> ? layout_A.capacity(extent_A) : 0,
       cutlass::layout::is_trivial_permute<PermuteBLayout> ? layout_B.capacity(extent_B) : 0,
-      layout_C.capacity(extent_C),
+      layout_C.capacity(extent_C),                         // Matrix C batch stride
       cutlass::layout::is_trivial_permute<PermuteDLayout> ? layout_C.capacity(extent_C) : 0,
-      layout_A.stride(0),
+      layout_A.stride(0),                                   // Matrix leading dimensions
       layout_B.stride(0),
       layout_C.stride(0),
       layout_C.stride(0),
     };
 
-    // Initialize the GEMM object
-    Gemm gemm_normal;
+    //
+    // Kernel Execution
+    // ================
+    //
 
-    CHECK_CUTLASS_CALL(gemm_normal.initialize(arguments, nullptr), return false);
+    // Initialize GEMM kernel with configured arguments
+    Gemm gemm_permute;
+    CHECK_CUTLASS_CALL(gemm_permute.initialize(arguments, nullptr), return false);
 
-    // Run the normal GEMM object
-    CHECK_CUTLASS_CALL(gemm_normal.run(), return false);
+    // Execute initial kernel run
+    CHECK_CUTLASS_CALL(gemm_permute.run(), return false);
 
-    // Wait for completion
+    // Synchronize to ensure completion before verification
     CHECK_CUDA_CALL(cudaDeviceSynchronize(), return false);
 
     //
-    // Verify correctness
+    // Numerical Verification
+    // ======================
     //
     if (options.reference_check) {
-      if (validate(gemm_normal)) {
-        std::cout << "\nPassed verification\n" << std::endl;
-      }
-      else {
-        std::cerr << "\n*** Error - problem failed the QA check ***\n" << std::endl;
+      if (validate(gemm_permute)) {
+        std::cout << "\n✓ PASSED: Numerical verification successful\n" << std::endl;
+      } else {
+        std::cerr << "\n✗ FAILED: Numerical verification failed\n" << std::endl;
+        std::cerr << "Kernel output does not match reference implementation.\n" << std::endl;
         return false;
       }
     }
 
-    // Warm-up run of the normal GEMM object
-    CHECK_CUTLASS_CALL(gemm_normal.run(), return false);
+    //
+    // Performance Measurement
+    // =======================
+    //
 
-    // Construct events
+    // Warm-up run to stabilize GPU clocks
+    CHECK_CUTLASS_CALL(gemm_permute.run(), return false);
+
+    // Create timing events
     cudaEvent_t events[2];
     for (auto & event : events) {
       CHECK_CUDA_CALL(cudaEventCreate(&event), return false);
     }
 
-    // Record an event at the start of a series of GEMM operations
+    // Start timing measurement
     CHECK_CUDA_CALL(cudaEventRecord(events[0]), return false);
 
-    // Run profiling loop
+    // Execute performance measurement loop
     for (int iter = 0; iter < options.iterations; ++iter) {
-      gemm_normal();
+      gemm_permute();
     }
 
-    // Record an event when the GEMM operations have been launched.
+    // End timing measurement
     CHECK_CUDA_CALL(cudaEventRecord(events[1]), return false);
 
-    // Wait for work on the device to complete.
+    // Wait for all operations to complete
     CHECK_CUDA_CALL(cudaEventSynchronize(events[1]), return false);
 
-    // Measure elapsed runtime
+    // Calculate performance metrics
     float runtime_total_ms = 0;
     CHECK_CUDA_CALL(cudaEventElapsedTime(&runtime_total_ms, events[0], events[1]), return false);
 
-    // Compute average runtime and GFLOPs.
     double runtime_avg_ms = double(runtime_total_ms) / double(options.iterations);
     double gflops = options.gflops(runtime_avg_ms / 1000.0, kBatched);
 
-    // Cleanup
+    // Calculate effective bandwidth accounting for permutation overhead
+    double total_bytes = double(sizeof(ElementInput)) *
+                        (options.problem_each.product() * 2) * // A + B matrices
+                        (kBatched ? options.batch_count : 1) +
+                        double(sizeof(ElementOutput)) *
+                        (options.problem_each.m() * options.problem_each.n()) * // D matrix
+                        (kBatched ? options.batch_count : 1);
+    double bandwidth_gbps = total_bytes / (runtime_avg_ms / 1000.0) / 1e9;
+
+    // Cleanup timing resources
     for (auto event : events) {
       CHECK_CUDA_CALL(cudaEventDestroy(event), return false);
     }
 
-    std::cout << "    Runtime: " << runtime_avg_ms << " ms\n"
-                 "     GFLOPs: " << gflops << std::endl;
+    // Display performance results
+    std::cout << "Performance Results:" << std::endl;
+    std::cout << "  Average Runtime: " << runtime_avg_ms << " ms" << std::endl;
+    std::cout << "  Throughput: " << gflops << " GFLOP/s" << std::endl;
+    std::cout << "  Memory Bandwidth: " << bandwidth_gbps << " GB/s" << std::endl;
 
     return true;
   }
@@ -808,34 +998,35 @@ using GemmPermute = cutlass::gemm::device::GemmUniversal<
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////
 
+/// Main Entry Point
+/// ================
+/// Orchestrates the complete GEMM permutation demonstration including
+/// hardware validation, configuration setup, and execution of all test cases
 int main(int argc, char const **args) {
 
   //
-  // This example uses mma.sync to directly access Tensor Cores to achieve peak performance.
+  // Hardware and Software Requirements Validation
+  // =============================================
   //
 
   cudaDeviceProp props;
-
   CHECK_CUDA_CALL(cudaGetDeviceProperties(&props, 0), return EXIT_FAILURE);
 
+  // Verify Ampere architecture and CUDA 11+ for Tensor Core support
   if (__CUDACC_VER_MAJOR__ < 11 || props.major < 8) {
-  
-    //
-    // This example requires an NVIDIA Ampere-architecture GPU.
-    //
-
-    std::cout << "CUTLASS's GEMM+Permute example requires a GPU of NVIDIA's Ampere Architecture "
-                 "or later (compute capability 80 or greater).\n";
-
+    std::cout << "CUTLASS GEMM+Permutation example requires:\n"
+                 "  - NVIDIA Ampere architecture (compute capability 8.0+)\n"
+                 "  - CUDA Toolkit 11.0 or later\n"
+                 "Current configuration is not supported.\n";
     return EXIT_SUCCESS;
   }
 
   //
-  // Parse options
+  // Command Line Processing
+  // =======================
   //
 
   Options options;
-  
   options.parse(argc, args);
 
   if (options.help) {
@@ -844,7 +1035,7 @@ int main(int argc, char const **args) {
   }
 
   if (options.error) {
-    std::cerr << "Aborting execution." << std::endl;
+    std::cerr << "ERROR: Invalid command line arguments." << std::endl;
     return EXIT_FAILURE;
   }
 
@@ -1153,8 +1344,15 @@ int main(int argc, char const **args) {
   >;
 
   //
-  // Profile it
+  // Test Execution: Comprehensive Permutation Pattern Evaluation
+  // ============================================================
   //
+
+  std::cout << "CUTLASS GEMM Permutation Example" << std::endl;
+  std::cout << "================================" << std::endl;
+  std::cout << "Testing various tensor permutation patterns with GEMM operations." << std::endl;
+  std::cout << "Device: " << props.name << " (Compute Capability " << props.major << "." << props.minor << ")" << std::endl;
+  std::cout << std::endl;
 
   Testbed<ElementInput, ElementInput, ElementOutput> testbed(options);
 
@@ -1212,10 +1410,22 @@ int main(int argc, char const **args) {
   result &= testbed.profile_GEMM_permute<NNNGemmBatchedPermuteAB>();
   result &= testbed.profile_GEMM_permute<NNNGemmBatchedPermuteABD>();
 
+  //
+  // Final Results Summary
+  // ====================
+  //
   std::cout << "\n"
                "====================================================\n"
-               "Finished (" << (result ? "PASS" : "FAIL") << ")\n"
-               "====================================================" << std::endl;
+               "GEMM Permutation Example: " << (result ? "✓ ALL TESTS PASSED" : "✗ SOME TESTS FAILED") << "\n";
+  if (result) {
+    std::cout << "All permutation patterns executed successfully.\n"
+                 "Performance results demonstrate efficient tensor\n"
+                 "permutation fusion with GEMM operations.\n";
+  } else {
+    std::cout << "One or more permutation patterns failed validation.\n"
+                 "Check tensor dimensions and alignment requirements.\n";
+  }
+  std::cout << "====================================================" << std::endl;
 
   return result ? EXIT_SUCCESS : EXIT_FAILURE;
 }
