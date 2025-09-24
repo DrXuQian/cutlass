@@ -29,24 +29,35 @@
  *
  **************************************************************************************************/
 /*! \file
-    \brief GEMM kernel to support the epilogue visitor model 
-    for customized softmax partial reduction epilogue fusion.
+    \brief 支持 epilogue visitor 模型的 GEMM 内核
+    用于自定义 softmax 部分归约 epilogue 融合。
 
-    This source file will likely be moved to `include/cutlass/gemm/kernel/` in the future once
-    its usage has been stabilized. For now, it is included in this example to demonstrate
-    some basic output fusion options.
+    一旦使用方式稳定，此源文件可能会移动到 `include/cutlass/gemm/kernel/`。
+    目前包含在此示例中，以演示一些基本的输出融合选项。
+
+    EPILOGUE VISITOR 模式解释:
+    ==========================
+    Epilogue Visitor 是 CUTLASS 中的一种设计模式，允许用户在 GEMM 计算完成后
+    立即执行自定义操作，而无需将中间结果写回全局内存。这对于融合操作
+    (如 softmax) 特别有用，因为它:
+
+    1. 减少内存带宽使用 - 避免存储中间 GEMM 结果
+    2. 提高缓存局部性 - 在数据仍在寄存器/共享内存中时处理
+    3. 减少内核启动开销 - 单次内核调用而非多次
+    4. 支持复杂的归约操作 - 如 softmax 中的行级最大值和求和
 */
 
 #pragma once
 
-#include "cutlass/cutlass.h"
-#include "cutlass/fast_math.h"
-#include "cutlass/gemm/gemm.h"
-#include "cutlass/matrix_coord.h"
-#include "cutlass/complex.h"
-#include "cutlass/semaphore.h"
+// CUTLASS 核心组件
+#include "cutlass/cutlass.h"        // CUTLASS 基础定义和宏
+#include "cutlass/fast_math.h"       // 快速数学运算（针对 GPU 优化）
+#include "cutlass/gemm/gemm.h"       // GEMM 核心定义和枚举
+#include "cutlass/matrix_coord.h"    // 矩阵坐标系统
+#include "cutlass/complex.h"         // 复数类型支持
+#include "cutlass/semaphore.h"       // 线程同步原语
 
-#include "cutlass/trace.h"
+#include "cutlass/trace.h"           // 调试跟踪工具
 
 /////////////////////////////////////////////////////////////////////////////////////////////////
 
@@ -56,43 +67,55 @@ namespace kernel {
 
 /////////////////////////////////////////////////////////////////////////////////////////////////
 
+// 带有 Epilogue Visitor 的 GEMM 内核模板
+// =======================================
+// 此内核扩展了标准 GEMM，添加了自定义的 epilogue visitor 支持
+// 用于在 GEMM 计算完成后立即执行融合操作（如 softmax）
 template <
-  typename Mma_,                  ///! Threadblock-scoped matrix multiply-accumulate
-  typename Epilogue_,             ///! Epilogue
-  typename ThreadblockSwizzle_    ///! Threadblock swizzling function
+  typename Mma_,                  ///! 线程块范围的矩阵乘累加器
+  typename Epilogue_,             ///! Epilogue 处理器（包含 visitor）
+  typename ThreadblockSwizzle_    ///! 线程块调度函数（优化内存访问模式）
 >
 struct GemmWithEpilogueVisitor {
 public:
 
-  using Mma = Mma_;
-  using Epilogue = Epilogue_;
-  using EpilogueVisitor = typename Epilogue::Visitor;
-  using ThreadblockSwizzle = ThreadblockSwizzle_;
+  // 核心组件类型定义
+  using Mma = Mma_;                                     // 矩阵乘法累加器
+  using Epilogue = Epilogue_;                           // Epilogue 处理器
+  using EpilogueVisitor = typename Epilogue::Visitor;   // 自定义 visitor（执行 softmax）
+  using ThreadblockSwizzle = ThreadblockSwizzle_;       // 线程块调度策略
 
-  using ElementA = typename Mma::IteratorA::Element;
-  using LayoutA = typename Mma::IteratorA::Layout;
-  using TensorRefA = TensorRef<ElementA, LayoutA>;
+  // 输入矩阵 A 的类型配置
+  using ElementA = typename Mma::IteratorA::Element;    // A 矩阵元素类型 (通常为 half_t)
+  using LayoutA = typename Mma::IteratorA::Layout;      // A 矩阵内存布局 (RowMajor/ColumnMajor)
+  using TensorRefA = TensorRef<ElementA, LayoutA>;      // A 矩阵张量引用类型
 
-  using ElementB = typename Mma::IteratorB::Element;
-  using LayoutB = typename Mma::IteratorB::Layout;
-  using TensorRefB = TensorRef<ElementB, LayoutB>;
+  // 输入矩阵 B 的类型配置
+  using ElementB = typename Mma::IteratorB::Element;    // B 矩阵元素类型 (通常为 half_t)
+  using LayoutB = typename Mma::IteratorB::Layout;      // B 矩阵内存布局
+  using TensorRefB = TensorRef<ElementB, LayoutB>;      // B 矩阵张量引用类型
 
-  using ElementC = typename EpilogueVisitor::ElementOutput;
-  using LayoutC = typename Epilogue::Layout;
-  using TensorRefC = TensorRef<ElementC, LayoutC>;
+  // 输出矩阵 C/D 的类型配置
+  using ElementC = typename EpilogueVisitor::ElementOutput; // 输出元素类型
+  using LayoutC = typename Epilogue::Layout;            // 输出矩阵内存布局
+  using TensorRefC = TensorRef<ElementC, LayoutC>;      // 输出矩阵张量引用类型
 
-  static ComplexTransform const kTransformA = Mma::kTransformA;
-  static ComplexTransform const kTransformB = Mma::kTransformB;
-  using Operator = typename Mma::Operator;
+  // 矩阵变换配置（用于复数支持）
+  static ComplexTransform const kTransformA = Mma::kTransformA;  // A 矩阵复数变换类型
+  static ComplexTransform const kTransformB = Mma::kTransformB;  // B 矩阵复数变换类型
+  using Operator = typename Mma::Operator;                       // 底层数学运算符类型
 
-  using OperatorClass = typename Mma::Operator::OperatorClass;
-  using ThreadblockShape = typename Mma::Shape;
-  using WarpShape = typename Mma::Operator::Shape;
-  using InstructionShape = typename Mma::Policy::Operator::InstructionShape;
-  using ArchTag = typename Mma::ArchTag;
+  // 计算层次配置 - 定义不同级别的并行结构
+  using OperatorClass = typename Mma::Operator::OperatorClass;    // 运算类别 (TensorOp/SIMT)
+  using ThreadblockShape = typename Mma::Shape;                   // 线程块级分块形状
+  using WarpShape = typename Mma::Operator::Shape;                // Warp 级分块形状
+  using InstructionShape = typename Mma::Policy::Operator::InstructionShape; // 指令级形状
+  using ArchTag = typename Mma::ArchTag;                          // 目标 GPU 架构标签
 
-  using ElementNorm = typename EpilogueVisitor::ElementNorm;
-  using ElementSum = typename EpilogueVisitor::ElementSum;
+  // Softmax 计算所需的辅助数据类型
+  // 这些类型用于实现数值稳定的 softmax 算法
+  using ElementNorm = typename EpilogueVisitor::ElementNorm;  // 行最大值类型 (数值稳定性)
+  using ElementSum = typename EpilogueVisitor::ElementSum;    // 行指数和类型 (归一化)
 
   static int const kStages = Mma::kStages;
   static int const kAlignmentA = Mma::IteratorA::AccessType::kElements;

@@ -30,127 +30,134 @@
  **************************************************************************************************/
 
 /**
- * CUTLASS Example 35: GEMM + Softmax Fusion
+ * CUTLASS 示例 35: GEMM + Softmax 融合
+ * ===================================
  *
- * This example demonstrates a fused GEMM+Softmax kernel that combines matrix multiplication
- * with softmax activation in a single GPU kernel launch. This fusion provides significant
- * performance benefits for transformer and attention mechanisms commonly used in modern
- * deep learning workloads.
+ * 此示例展示了一个融合的 GEMM+Softmax 内核，将矩阵乘法与 softmax 激活
+ * 在单个 GPU 内核启动中结合。此融合为现代深度学习工作负载中常用的
+ * transformer 和注意力机制提供了显著的性能优势。
  *
- * FUSION OVERVIEW:
- * ================
- * The kernel performs: D = softmax(alpha * A @ B + beta * C)
- * where softmax is applied row-wise across the N dimension of the output matrix.
+ * 融合概述:
+ * =========
+ * 内核执行: D = softmax(alpha * A @ B + beta * C)
+ * 其中 softmax 沿输出矩阵的 N 维度按行应用。
  *
- * PERFORMANCE BENEFITS:
- * ====================
- * 1. Memory Bandwidth Reduction: Eliminates intermediate storage of GEMM output
- * 2. Kernel Launch Overhead: Single kernel vs. separate GEMM + Softmax launches
- * 3. Cache Efficiency: Better data locality by keeping intermediate results in registers/shared memory
- * 4. Numerical Stability: Uses numerically stable softmax implementation with max subtraction
+ * 性能优势:
+ * =========
+ * 1. 内存带宽减少: 消除 GEMM 输出的中间存储
+ * 2. 内核启动开销: 单个内核 vs 分离的 GEMM + Softmax 启动
+ * 3. 缓存效率: 通过在寄存器/共享内存中保持中间结果来改善数据局部性
+ * 4. 数值稳定性: 使用带有最大值减法的数值稳定 softmax 实现
  *
- * KEY ARCHITECTURAL FEATURES:
- * ===========================
- * - Tensor Core acceleration for GEMM computation (Ampere architecture)
- * - Fused epilogue that computes both GEMM result and softmax in the same threadblock
- * - Two-pass softmax algorithm: first pass finds max, second pass computes exp and sum
- * - Optimized memory access patterns for both GEMM and reduction operations
+ * 关键架构特性:
+ * =============
+ * - GEMM 计算的 Tensor Core 加速 (Ampere 架构)
+ * - 融合的 epilogue，在同一个线程块中计算 GEMM 结果和 softmax
+ * - 两遍 softmax 算法: 第一遍找到最大值，第二遍计算 exp 和 sum
+ * - 针对 GEMM 和归约操作优化的内存访问模式
  *
- * COMMON USE CASES:
- * =================
- * 1. Transformer Attention: Query-Key multiplication followed by softmax
- * 2. Classification Layers: Final linear layer + softmax activation
- * 3. Sequence-to-Sequence Models: Attention score computation
- * 4. BERT/GPT-style Models: Multi-head attention mechanisms
+ * 常见用例:
+ * =========
+ * 1. Transformer 注意力: Query-Key 乘法后跟 softmax
+ * 2. 分类层: 最终线性层 + softmax 激活
+ * 3. 序列到序列模型: 注意力分数计算
+ * 4. BERT/GPT 风格模型: 多头注意力机制
  *
- * IMPLEMENTATION DETAILS:
- * =======================
- * - Uses CUTLASS GemmSoftmax template for optimized fusion
- * - Supports batched operations for processing multiple sequences
- * - Configurable threadblock and warp shapes for different problem sizes
- * - Automatic selection of optimal tile sizes based on problem dimensions
+ * 实现细节:
+ * =========
+ * - 使用 CUTLASS GemmSoftmax 模板进行优化融合
+ * - 支持批处理操作以处理多个序列
+ * - 针对不同问题大小可配置的线程块和 warp 形状
+ * - 基于问题维度自动选择最优分块大小
  *
- * NUMERICAL CONSIDERATIONS:
- * =========================
- * The implementation uses a numerically stable softmax algorithm that:
- * 1. Subtracts the maximum value from each row before exponentiation
- * 2. Computes the sum of exponentials in a separate reduction pass
- * 3. Normalizes by dividing each exponential by the sum
+ * 数值考虑:
+ * =========
+ * 实现使用数值稳定的 softmax 算法:
+ * 1. 在指数运算前从每行减去最大值
+ * 2. 在单独的归约遍历中计算指数和
+ * 3. 通过将每个指数除以和来标准化
  *
- * This prevents overflow and maintains numerical precision even for large input values.
+ * 这防止了溢出并保持了数值精度，即使对于大的输入值也是如此。
  */
 
-#include <cmath>
-#include <iostream>
-#include <vector>
-#include <limits>
+// 标准 C++ 库包含
+#include <cmath>        // 数学函数 (exp, log 等)
+#include <iostream>     // 标准输入输出流
+#include <vector>       // 动态数组容器
+#include <limits>       // 数值限制定义
 
-#include "cutlass/cutlass.h"
-#include "cutlass/arch/memory.h"
-#include "cutlass/arch/memory_sm75.h"
-#include "cutlass/gemm/device/gemm_complex.h"
-#include "cutlass/numeric_types.h"
-#include "cutlass/numeric_size.h"
-#include "cutlass/util/command_line.h"
-#include "cutlass/util/host_tensor.h"
+// CUTLASS 核心库
+#include "cutlass/cutlass.h"              // CUTLASS 基础定义
+#include "cutlass/arch/memory.h"          // 内存架构抽象
+#include "cutlass/arch/memory_sm75.h"     // SM75 架构特定内存操作
+#include "cutlass/gemm/device/gemm_complex.h"  // 复数 GEMM 设备实现
+#include "cutlass/numeric_types.h"        // 数值类型定义 (half_t 等)
+#include "cutlass/numeric_size.h"         // 数值大小工具
+#include "cutlass/util/command_line.h"    // 命令行解析工具
+#include "cutlass/util/host_tensor.h"     // 主机张量容器
 
-#include "cutlass/util/reference/host/gemm_complex.h"
-#include "cutlass/util/reference/device/gemm_complex.h"
-#include "cutlass/util/reference/host/tensor_reduce.h"
-#include "cutlass/util/reference/host/tensor_compare.h"
-#include "cutlass/util/reference/host/tensor_norm.h"
-#include "cutlass/util/reference/host/tensor_copy.h"
-#include "cutlass/util/reference/device/tensor_fill.h"
-#include "cutlass/util/reference/host/tensor_fill.h"
-#include "cutlass/util/reference/host/error_metrics.h"
-#include "cutlass/util/tensor_view_io.h"
-#include "cutlass/numeric_size.h" // cutlass::bits_to_bytes
+// CUTLASS 参考实现 - 用于验证正确性
+#include "cutlass/util/reference/host/gemm_complex.h"     // 主机端复数 GEMM 参考
+#include "cutlass/util/reference/device/gemm_complex.h"   // 设备端复数 GEMM 参考
+#include "cutlass/util/reference/host/tensor_reduce.h"    // 张量归约操作
+#include "cutlass/util/reference/host/tensor_compare.h"   // 张量比较工具
+#include "cutlass/util/reference/host/tensor_norm.h"      // 张量范数计算
+#include "cutlass/util/reference/host/tensor_copy.h"      // 张量拷贝操作
+#include "cutlass/util/reference/device/tensor_fill.h"    // 设备端张量填充
+#include "cutlass/util/reference/host/tensor_fill.h"      // 主机端张量填充
+#include "cutlass/util/reference/host/error_metrics.h"    // 误差度量计算
+#include "cutlass/util/tensor_view_io.h"  // 张量视图输入输出
+#include "cutlass/numeric_size.h"         // bits_to_bytes 工具函数
 
-#include "cutlass/layout/matrix.h"
-#include "cutlass/epilogue/thread/linear_combination.h"
+// CUTLASS 布局和 epilogue 支持
+#include "cutlass/layout/matrix.h"                        // 矩阵布局定义
+#include "cutlass/epilogue/thread/linear_combination.h"   // 线性组合 epilogue
 /////////////////////////////////////////////////////////////////////////////////////////////////
 
+// 本示例的融合 GEMM+Softmax 实现
 #include "gemm_with_softmax.h"
 
 /////////////////////////////////////////////////////////////////////////////////////////////////
 
+// 调试跟踪宏 - 用于输出调试信息和代码执行路径
 #define TRACE(x) { std::cout << "gemm_softmax.cu:" << __LINE__ << "  " << x << std::endl; }
 
 /////////////////////////////////////////////////////////////////////////////////////////////////
 
-// Test result enumeration to track verification status
+// 测试结果枚举 - 跟踪验证状态
+// 用于标识测试的最终结果状态
 enum class Disposition {
-  kPassed,      // All verifications passed successfully
-  kIncorrect,   // Numerical verification failed
-  kNotVerified  // Verification was skipped
+  kPassed,      // 所有验证成功通过
+  kIncorrect,   // 数值验证失败
+  kNotVerified  // 验证被跳过
 };
 
 /////////////////////////////////////////////////////////////////////////////////////////////////
 
-// Command line options parsing
-// Configures problem dimensions, batch size, and execution parameters
+// 命令行选项解析
+// 配置问题维度、批大小和执行参数
 struct Options {
 
-  bool help;
-  cutlass::gemm::GemmCoord problem_size;
-  int batch_count;
-  int iterations;
-  unsigned seed;
-  float alpha;
-  float beta;
-  bool verification_enabled;
-  float tolerance;
+  bool help;                                    // 显示帮助信息标志
+  cutlass::gemm::GemmCoord problem_size;        // GEMM 问题大小 (M, N, K)
+  int batch_count;                              // 批处理数量
+  int iterations;                               // 性能测试迭代次数
+  unsigned seed;                                // 随机数种子，用于可重现的结果
+  float alpha;                                  // GEMM 缩放因子: alpha * A @ B
+  float beta;                                   // 偏置缩放因子: beta * C
+  bool verification_enabled;                    // 启用数值正确性检查
+  float tolerance;                              // 验证的可接受误差容忍度
 
   Options():
-    help(false),
-    problem_size({16, 24, 64}),    // Default: M=16, N=24, K=64 (small test case)
-    batch_count(16),               // Process 16 matrices in parallel
-    iterations(20),                // Number of timing iterations for performance measurement
-    seed(2022),                    // Random seed for reproducible results
-    alpha(1),                      // GEMM scaling factor: alpha * A @ B
-    beta(0),                       // Bias scaling factor: beta * C (disabled by default)
-    verification_enabled(true),    // Enable numerical correctness checking
-    tolerance(1e-5f)              // Acceptable error tolerance for verification
+    help(false),                        // 默认不显示帮助
+    problem_size({16, 24, 64}),         // 默认: M=16, N=24, K=64 (小测试用例)
+    batch_count(16),                    // 并行处理 16 个矩阵
+    iterations(20),                     // 性能测量的计时迭代次数
+    seed(2022),                         // 可重现结果的随机种子
+    alpha(1),                           // GEMM 缩放因子: alpha * A @ B
+    beta(0),                            // 偏置缩放因子: beta * C (默认禁用)
+    verification_enabled(true),         // 启用数值正确性检查
+    tolerance(1e-5f)                   // 验证的可接受误差容忍度
   { }
 
   bool valid() {
@@ -158,27 +165,33 @@ struct Options {
     return true;
   }
 
-  // Parses the command line
+  /// 解析命令行参数
+  /// 从命令行参数中提取配置选项
   void parse(int argc, char const **args) {
     cutlass::CommandLine cmd(argc, args);
 
+    // 检查是否需要显示帮助信息
     if (cmd.check_cmd_line_flag("help")) {
       help = true;
     }
 
-    cmd.get_cmd_line_argument("m", problem_size.m());
-    cmd.get_cmd_line_argument("n", problem_size.n());
-    cmd.get_cmd_line_argument("k", problem_size.k());
+    // 解析 GEMM 问题维度参数
+    cmd.get_cmd_line_argument("m", problem_size.m());  // 矩阵 A 的行数
+    cmd.get_cmd_line_argument("n", problem_size.n());  // 矩阵 B 的列数
+    cmd.get_cmd_line_argument("k", problem_size.k());  // 内积维度
 
+    // 解析批处理配置
     cmd.get_cmd_line_argument("batch_count", batch_count);
 
-    cmd.get_cmd_line_argument("alpha", alpha);
-    cmd.get_cmd_line_argument("beta", beta);
+    // 解析 GEMM 缩放参数
+    cmd.get_cmd_line_argument("alpha", alpha);  // A*B 的缩放系数
+    cmd.get_cmd_line_argument("beta", beta);    // 偏置矩阵 C 的缩放系数
 
-    cmd.get_cmd_line_argument("iterations", iterations);
-    cmd.get_cmd_line_argument("verify", verification_enabled);
-    cmd.get_cmd_line_argument("seed", seed);
-    cmd.get_cmd_line_argument("tolerance", tolerance);
+    // 解析测试和验证参数
+    cmd.get_cmd_line_argument("iterations", iterations);           // 性能测试迭代次数
+    cmd.get_cmd_line_argument("verify", verification_enabled);     // 是否启用验证
+    cmd.get_cmd_line_argument("seed", seed);                       // 随机数种子
+    cmd.get_cmd_line_argument("tolerance", tolerance);             // 数值误差容忍度
   }
 
   /// Prints the usage statement.

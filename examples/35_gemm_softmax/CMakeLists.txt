@@ -1,36 +1,33 @@
 
-# Copyright (c) 2017 - 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# 版权声明 (c) 2017 - 2025 NVIDIA CORPORATION & AFFILIATES. 保留所有权利。
 # SPDX-License-Identifier: BSD-3-Clause
 #
-# Redistribution and use in source and binary forms, with or without
-# modification, are permitted provided that the following conditions are met:
+# 在满足以下条件的情况下，允许以源代码和二进制形式重新分发和使用，
+# 无论是否经过修改：
 #
-# 1. Redistributions of source code must retain the above copyright notice, this
-# list of conditions and the following disclaimer.
+# 1. 源代码的重新分发必须保留上述版权声明、此条件列表和以下免责声明。
 #
-# 2. Redistributions in binary form must reproduce the above copyright notice,
-# this list of conditions and the following disclaimer in the documentation
-# and/or other materials provided with the distribution.
+# 2. 二进制形式的重新分发必须在文档和/或随分发提供的其他材料中
+# 复制上述版权声明、此条件列表和以下免责声明。
 #
-# 3. Neither the name of the copyright holder nor the names of its
-# contributors may be used to endorse or promote products derived from
-# this software without specific prior written permission.
+# 3. 版权持有者的姓名或其贡献者的姓名不得用于认可或推广
+# 从此软件衍生的产品，除非事先获得特定的书面许可。
 #
-# THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
-# AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
-# IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
-# DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
-# FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
-# DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
-# SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
-# CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
-# OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
-# OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+# 此软件由版权持有者和贡献者"按原样"提供，
+# 不提供任何明示或暗示的保证，包括但不限于适销性和特定用途适用性的暗示保证。
+# 在任何情况下，版权持有者或贡献者均不对任何直接、间接、偶然、特殊、惩戒性或
+# 后果性损害（包括但不限于替代商品或服务的采购；使用、数据或利润的损失；
+# 或业务中断）承担责任，无论是在合同、严格责任或侵权（包括疏忽或其他）理论下，
+# 以任何方式因使用此软件而产生，即使已被告知此类损害的可能性。
 
 
+# CUTLASS 示例 35: GEMM + Softmax 融合构建配置
+# ===========================================
+# 此 CMakeLists.txt 文件配置用于构建 GEMM+Softmax 融合示例
+# 该示例展示了如何在单个 GPU 内核中融合矩阵乘法和 softmax 操作
 
 cutlass_example_add_executable(
-  35_gemm_softmax
-  gemm_softmax.cu
+  35_gemm_softmax        # 目标可执行文件名
+  gemm_softmax.cu        # 主要源文件，包含完整的融合实现
   )
 
