@@ -53,12 +53,12 @@
  * 本示例需要 NVIDIA Ampere GPU 或更新架构。
  */
 
-// Standard Library includes
+// 标准库头文件
 #include <iostream>
 #include <sstream>
 #include <vector>
 
-// CUTLASS Includes
+// CUTLASS 核心头文件
 #include "cutlass/cutlass.h"
 #include "cutlass/functional.h"
 #include "cutlass/layout/matrix.h"
@@ -66,7 +66,7 @@
 #include "cutlass/epilogue/warp/fragment_iterator_tensor_op.h"
 #include "cutlass/epilogue/warp/tile_iterator_tensor_op.h"
 
-// CUTLASS Utility Includes
+// CUTLASS 工具头文件
 #include "cutlass/util/host_tensor.h"
 #include "cutlass/util/tensor_view_io.h"
 #include "cutlass/util/reference/host/tensor_compare.h"
@@ -75,18 +75,18 @@
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////
 
-// Define the overall warp-level problem shape
+// 定义 Warp 级问题的矩阵维度
+// M: 输出矩阵行数, N: 输出矩阵列数, K: 矩阵乘法的归约维度
 int const kM = 27;
 int const kN = 31;
 int const kK = 17;
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////
 
-// Define a warp-level GEMM operator.
+// 定义 Warp 级 GEMM 操作符
 //
-// This template could be part of the CUTLASS Template Library or implemented internally. This
-// wraps the matrix multiply operation and epilogue with a GEMM-like interface that can be
-// instantiated in device code.
+// 这个模板封装了矩阵乘法操作和后处理逻辑，提供了类似 GEMM 的接口，
+// 可以在设备代码中实例化。该操作符协调 Warp 内所有线程共同完成矩阵乘法。
 
 namespace cutlass {
 namespace gemm {
@@ -105,28 +105,29 @@ template <
 >
 class GemmTensorOp {
 public:
-
+  // 计算对齐后的 Warp 形状，确保维度是指令形状的整数倍
   using WarpShape = GemmShape<
     ((Shape::kM + InstructionShape::kM - 1) / InstructionShape::kM) * InstructionShape::kM,
     ((Shape::kN + InstructionShape::kN - 1) / InstructionShape::kN) * InstructionShape::kN,
     InstructionShape::kK
   >;
 
+  // 定义 Warp 级矩阵乘法操作，使用 Tensor Core 指令
   using MmaWarp = typename cutlass::gemm::warp::DefaultMmaTensorOp<
     WarpShape,
     InstructionShape,
-    double,                             // Data type of A elements
-    cutlass::layout::RowMajor,          // Layout of A matrix
-    double,                             // Data type of B elements
-    cutlass::layout::ColumnMajor,       // Layout of B matrix
-    double,                             // Data type of C elements
-    cutlass::layout::RowMajor           // Layout of C matrix
+    double,                             // A 矩阵元素数据类型
+    cutlass::layout::RowMajor,          // A 矩阵布局（行主序）
+    double,                             // B 矩阵元素数据类型
+    cutlass::layout::ColumnMajor,       // B 矩阵布局（列主序）
+    double,                             // C 矩阵元素数据类型
+    cutlass::layout::RowMajor           // C 矩阵布局（行主序）
   >::Type;
  
-  // Number of 'K groups' 
+  // K 维度分组数：将 K 维度分割成多个指令大小的块 
   int const kKgroups = (Shape::kK + InstructionShape::kK - 1) / InstructionShape::kK;
 
-  // Define a 'FragmentIterator' to iterate over slices of accumulators
+  // Fragment 迭代器：用于遍历累加器的片段
   using FragmentIterator = cutlass::epilogue::warp::FragmentIteratorTensorOp<
     typename MmaWarp::Shape,
     InstructionShape,
@@ -135,7 +136,7 @@ public:
     cutlass::layout::RowMajor
   >;
 
-  // Define an epilogue 'Tile Iteterator' to iterate over slices of elements in Shared Memory
+  // 后处理 Tile 迭代器：用于遍历共享内存中的元素片段
   using AccumulatorTileIterator = cutlass::epilogue::warp::TileIteratorTensorOpCanonical<
     typename MmaWarp::Shape,
     InstructionShape,
@@ -161,73 +162,75 @@ public:
     TensorRefC ref_D,
     int lane_id) const {
   
-    // Instantiate iterators pointing to slices of the A and B matrices in shared memory
+    // 创建指向共享内存中 A 和 B 矩阵片段的迭代器
     typename MmaWarp::IteratorA iter_A(ref_A, {Shape::kM, Shape::kK}, lane_id);
     typename MmaWarp::IteratorB iter_B(ref_B, {Shape::kK, Shape::kN}, lane_id);
 
-    // Instantiate and clear accumulator tile holding the C matrix
+    // 创建并清零用于保存 C 矩阵的累加器 tile
     typename MmaWarp::FragmentC accum;
     accum.clear();
   
-    // Instantiate the warp-level matrix multiply operator
+    // 实例化 Warp 级矩阵乘法操作符
     MmaWarp mma_op;
 
-    // Instantiate fragments holding the slice of the matrix held by each warp
+    // 创建用于保存每个 Warp 持有的矩阵片段的 Fragment
+    // 使用双缓冲技术（[2]）实现计算与数据加载的重叠
     typename MmaWarp::FragmentA frag_A[2];
     typename MmaWarp::FragmentB frag_B[2];
       
-    // Load fragments from shared memory
+    // 预加载第一个 K 分组的数据片段
     iter_A.load(frag_A[0]);
     iter_B.load(frag_B[0]);
 
+    // 移动到下一个 K 分组
     ++iter_A;
     ++iter_B;
 
-    // Load fragments from shared memory
+    // 主循环：遍历所有 K 分组进行矩阵乘法
     CUTLASS_PRAGMA_UNROLL
     for (int k = 0; k < kKgroups; ++k) {
 
-      // Load fragments from shared memory
+      // 预加载下一个 K 分组的数据（双缓冲）
       iter_A.load(frag_A[(k + 1) % 2]);
       iter_B.load(frag_B[(k + 1) % 2]);
 
       ++iter_A;
       ++iter_B;
 
-      // Compute the matrix multiply
+      // 执行当前 K 分组的矩阵乘法，累加到 accum
       mma_op(accum, frag_A[k % 2], frag_B[k % 2], accum);
     }
   
-    // Instantiate iterators
+    // 创建后处理阶段的迭代器
     FragmentIterator accum_frag_it(accum);
     AccumulatorTileIterator source_tile_it(ref_C, {Shape::kM, Shape::kN}, lane_id);
     AccumulatorTileIterator dest_tile_it(ref_D, {Shape::kM, Shape::kN}, lane_id);
 
-    // Define function objects for linear scaling operation
+    // 定义线性缩放操作的函数对象
     cutlass::multiplies<typename FragmentIterator::Fragment> mul_source;
     cutlass::multiply_add<typename FragmentIterator::Fragment> mul_add_accumulator;
 
-    // Iterate over the epilogue components
+    // 遍历后处理组件，应用 alpha 和 beta 缩放
     CUTLASS_PRAGMA_UNROLL
     for (int idx = 0; idx < FragmentIterator::kIterations; ++idx) {
 
-      // Define storage for slices of the accumulators
+      // 定义累加器片段的存储空间
       typename FragmentIterator::Fragment accum_fragment;
       typename FragmentIterator::Fragment source_fragment;
 
-      // Select a slice of accumulators from the accumulator tile
+      // 从累加器 tile 中选择一个片段
       accum_frag_it.load(accum_fragment);
       ++accum_frag_it;
 
-      // Load a corresponding slice from Shared memory
+      // 从共享内存加载对应的源数据片段（C 矩阵）
       source_tile_it.load(source_fragment);
       ++source_tile_it;
 
-      // Compute linear scaling - alpha * AB + beta * C
+      // 计算线性组合：D = alpha * AB + beta * C
       source_fragment = mul_source(beta, source_fragment);
       accum_fragment = mul_add_accumulator(alpha, accum_fragment, source_fragment);
 
-      // Store the result to shared memory
+      // 将结果存储回共享内存
       dest_tile_it.store(accum_fragment);
       ++dest_tile_it;
     }
@@ -240,8 +243,11 @@ public:
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////
 
-// Sample kernel demonstrating a collective GEMM operation by a warp on arbitrary matrices held
-// in Shared Memory.
+// 示例核函数：演示 Warp 对共享内存中矩阵的协同 GEMM 操作
+// 这个核函数展示了完整的 Tensor Core GEMM 流程：
+// 1. 从全局内存加载数据到共享内存
+// 2. 执行 Warp 级矩阵乘法
+// 3. 将结果写回全局内存
 __global__ void kernel(
   double *D_gmem, 
   double alpha, 
@@ -250,12 +256,14 @@ __global__ void kernel(
   double beta,
   double const *C_gmem) {
 
-  // Define several matrices in shared memory
+  // 在共享内存中定义矩阵
+  // 注意：这些矩阵的布局已经针对 Tensor Core 操作优化
   __shared__ double A[kM][kK];
   __shared__ double B[kN][kK];
   __shared__ double C[kM][kN];
 
-  // Copy data into SMEM
+  // 将数据从全局内存复制到共享内存
+  // 只有线程 0 执行复制操作，避免冲突
   if (threadIdx.x == 0) {
     CUTLASS_PRAGMA_NO_UNROLL
     for (int m = 0; m < kM; ++m) {
@@ -280,27 +288,31 @@ __global__ void kernel(
 
   __syncthreads();
   
-  //
-  // Instantiate a warp-level matrix multiply operator given the fundamental instruction shape (8x8x4),
-  // overall shape, data type of each operand, and layout of each operand.
-  //
+  // 实例化 Warp 级矩阵乘法操作符
+  // 参数说明：
+  // - 指令形状 (8x8x4)：Tensor Core 的基本操作单元
+  // - 整体形状 (kM, kN, kK)：完整的矩阵维度
+  // - 数据类型：所有矩阵使用 double 精度
+  // - 布局：A 行主序，B 列主序，C 行主序
 
   using GemmTensorOp = cutlass::gemm::warp::GemmTensorOp<
     cutlass::gemm::GemmShape<kM, kN, kK>,
     cutlass::gemm::GemmShape<8, 8, 4>,
-    double,                             // Data type of A elements
-    cutlass::layout::RowMajor,          // Layout of A matrix
-    double,                             // Data type of B elements
-    cutlass::layout::ColumnMajor,       // Layout of B matrix
-    double,                             // Data type of C elements
-    cutlass::layout::RowMajor,          // Layout of C matrix
-    double                              // Scalar type of alpha and beta
+    double,                             // A 矩阵元素类型
+    cutlass::layout::RowMajor,          // A 矩阵布局（行主序）
+    double,                             // B 矩阵元素类型
+    cutlass::layout::ColumnMajor,       // B 矩阵布局（列主序）
+    double,                             // C 矩阵元素类型
+    cutlass::layout::RowMajor,          // C 矩阵布局（行主序）
+    double                              // alpha 和 beta 标量类型
   >;
 
-  // Instantiate the GEMM operator
+  // 实例化 GEMM 操作符
   GemmTensorOp gemm;
 
-  // Execute the warp-level GEMM operation
+  // 执行 Warp 级 GEMM 操作
+  // D = alpha * A * B + beta * C
+  // threadIdx.x 作为 lane_id 传入，用于确定每个线程的职责
   gemm(
     alpha, 
     {&A[0][0], kK},
@@ -311,8 +323,9 @@ __global__ void kernel(
     threadIdx.x);
 
   __syncthreads();
-  
-  // Copy data into SMEM
+
+  // 将结果从共享内存复制回全局内存
+  // 只有线程 0 执行复制操作
   if (threadIdx.x == 0) {
     CUTLASS_PRAGMA_NO_UNROLL
     for (int m = 0; m < kM; ++m) {
@@ -326,12 +339,12 @@ __global__ void kernel(
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////
 
-/// Entry point to canonical warp-level GEMM operation
+/// 程序入口点：规范化 Warp 级 GEMM 操作演示
 int main(int argc, const char *arg[]) {
 
   bool notSupported = false;
 
-  // CUTLASS must be compiled with CUDA 11 Toolkit to run these examples.
+  // 检查 CUDA 版本：CUTLASS 需要 CUDA 11 工具包来运行这些示例
   if (!(__CUDACC_VER_MAJOR__ >= 11)) {
     std::cerr << "NVIDIA Ampere Tensor Core operations must be compiled with CUDA 11.0 Toolkit or later." << std::endl;
     notSupported = true;
@@ -352,7 +365,7 @@ int main(int argc, const char *arg[]) {
   }
 
   if (notSupported) {
-    // Return 0 so tests are considered passing if run on unsupported platforms.
+    // 在不支持的平台上返回 0，使测试通过
     return 0;
   }
 
@@ -417,7 +430,7 @@ int main(int argc, const char *arg[]) {
 
   D.sync_host();
   
-  // Compute reference on host
+  // 在主机端计算参考结果，用于验证 GPU 计算的正确性
   cutlass::HostTensor<double, cutlass::layout::RowMajor> D_ref({kM, kN}, false);
 
   cutlass::reference::host::GemmComplex(
@@ -433,7 +446,7 @@ int main(int argc, const char *arg[]) {
     double()
   );
 
-  // Verify reference matches computed
+  // 验证 GPU 计算结果是否与参考结果匹配
   if (!cutlass::reference::host::TensorEquals(
     D.host_view(),
     D_ref.host_view())) {
