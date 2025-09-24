@@ -30,32 +30,37 @@
  **************************************************************************************************/
 
 /**
- * Example 23: GEMM with Operand Reduction Fusion
+ * CUTLASS Example 23: GEMM 与操作数归约融合
  *
- * This example demonstrates an advanced fusion technique where GEMM computation is combined
- * with reduction of one operand along the K dimension. This produces both the standard GEMM
- * output C = alpha * A * B + beta * C and a reduced vector (either Mx1 or 1xN).
+ * 本示例演示了一种高级融合技术，将 GEMM 计算与沿 K 维度的操作数归约相结合。
+ * 这同时产生标准 GEMM 输出 C = alpha * A * B + beta * C 和一个归约向量（Mx1 或 1xN）。
  *
- * Key Features:
- * - Fuses reduction operation with GEMM computation
- * - Reduces either A or B operand along K dimension during GEMM
- * - Optimized for Ampere architecture with 16x8x16 Tensor Core operations
- * - Supports both serial and parallel split-K strategies
+ * 核心特性：
+ * =========
+ * - 将归约操作与 GEMM 计算融合，避免额外的内核启动
+ * - 在 GEMM 执行期间沿 K 维度归约 A 或 B 操作数
+ * - 针对 Ampere 架构的 16x8x16 Tensor Core 操作优化
+ * - 支持串行和并行 split-K 策略
  *
- * Performance Benefits:
- * - Eliminates separate reduction kernel launch
- * - Reduces memory bandwidth by avoiding extra reads
- * - Better data locality as reduction happens during GEMM computation
+ * 性能优势：
+ * =========
+ * - 消除单独的归约内核启动开销
+ * - 通过避免额外的内存读取降低带宽需求
+ * - 归约在 GEMM 计算过程中进行，提供更好的数据局部性
  *
- * Use Cases:
- * - Computing row/column sums while performing matrix multiplication
- * - Batch normalization computations
- * - Statistical operations in neural networks
+ * 应用场景：
+ * =========
+ * - 在执行矩阵乘法时计算行/列和
+ * - 批归一化（Batch Normalization）计算
+ * - 神经网络中的统计操作
+ * - 注意力机制中的 softmax 归一化
  *
- * Implementation Details:
- * - Reduction happens primarily at warp level (gemm/warp/mma_with_reduction_tensor_op.h)
- * - Final reduction in epilogue (epilogue/threadblock/epilogue_gemm_k_reduction.h)
- * - Works with FP16/BF16 data types on Ampere SM80 architecture
+ * 实现细节：
+ * =========
+ * - 归约主要在 warp 级别进行（gemm/warp/mma_with_reduction_tensor_op.h）
+ * - 最终归约在后处理阶段完成（epilogue/threadblock/epilogue_gemm_k_reduction.h）
+ * - 使用 FP16/BF16 数据类型，在 Ampere SM80 架构上运行
+ * - 通过双缓冲技术隐藏内存延迟
  */
 
 #include <iostream>
@@ -82,91 +87,90 @@
 #include "helper.h"
 
 // =====================================================================
-// Data Type Configuration
+// 数据类型配置
 // =====================================================================
-// The code section below describes datatype for input, output tensors and computation between
-// elements
-using ElementAccumulator = float;                  // Data type of accumulator - float for higher precision
-using ElementComputeEpilogue = ElementAccumulator; // Data type of epilogue computation - matches accumulator
-using ElementInputA = cutlass::bfloat16_t;         // Data type of elements in input tensor A - BF16 for efficiency
-using ElementInputB = cutlass::bfloat16_t;         // Data type of elements in input tensor B - BF16 for efficiency
-using ElementOutput = cutlass::bfloat16_t;         // Data type of elements in output tensor - BF16 to match inputs
+// 定义输入、输出张量和计算过程中使用的数据类型
+using ElementAccumulator = float;                  // 累加器数据类型 - 使用 float 以获得更高精度
+using ElementComputeEpilogue = ElementAccumulator; // 后处理计算数据类型 - 与累加器一致
+using ElementInputA = cutlass::bfloat16_t;         // A 矩阵元素数据类型 - BF16 提高效率
+using ElementInputB = cutlass::bfloat16_t;         // B 矩阵元素数据类型 - BF16 提高效率
+using ElementOutput = cutlass::bfloat16_t;         // 输出矩阵元素数据类型 - BF16 与输入匹配
 
 // =====================================================================
-// Memory Layout Configuration
+// 内存布局配置
 // =====================================================================
-// Define how matrices are stored in memory
-using LayoutInputA = cutlass::layout::ColumnMajor;  // A matrix stored column-major (FORTRAN-style)
-using LayoutInputB = cutlass::layout::RowMajor;     // B matrix stored row-major (C-style)
-using LayoutOutput = cutlass::layout::ColumnMajor;  // Output C matrix stored column-major
-// Layout of the output vector from reduction operation
-using LayoutGemmKReduction = cutlass::layout::PitchLinear;  // Linear layout for reduced vector
+// 定义矩阵在内存中的存储方式
+using LayoutInputA = cutlass::layout::ColumnMajor;  // A 矩阵列主序存储（FORTRAN 风格）
+using LayoutInputB = cutlass::layout::RowMajor;     // B 矩阵行主序存储（C 风格）
+using LayoutOutput = cutlass::layout::ColumnMajor;  // 输出 C 矩阵列主序存储
+// 归约操作输出向量的布局
+using LayoutGemmKReduction = cutlass::layout::PitchLinear;  // 归约向量使用线性布局
 
 // =====================================================================
-// Hardware Architecture Configuration
+// 硬件架构配置
 // =====================================================================
-// This code section describes whether you want to use tensor cores or regular SIMT cores on GPU SM
-using MMAOp = cutlass::arch::OpClassTensorOp;  // Use Tensor Cores for matrix multiplication
+// 选择使用 Tensor Core 还是常规 SIMT 核心
+using MMAOp = cutlass::arch::OpClassTensorOp;  // 使用 Tensor Core 进行矩阵乘法
 
-// This code section describes CUDA SM architecture number
-using SmArch = cutlass::arch::Sm80;  // Target Ampere architecture (compute capability 8.0)
-
-// =====================================================================
-// Tile Configuration for Hierarchical Computation
-// =====================================================================
-// This code section describes the tile size a thread block will compute
-// Shape: <M, N, K> = <128, 128, 32>
-using ThreadblockShape = cutlass::gemm::GemmShape<128, 128, 32>;  // Each threadblock computes 128x128 output tile
-
-// This code section describes tile size a warp will compute
-// Shape: <M, N, K> = <64, 64, 32>
-using WarpShape = cutlass::gemm::GemmShape<64, 64, 32>;  // Each warp computes 64x64 output tile
-
-// This code section describes the size of MMA op
-// Shape: <M, N, K> = <16, 8, 16> - Ampere's mma.sync instruction shape
-using InstructionShape = cutlass::gemm::GemmShape<16, 8, 16>;  // Single Tensor Core instruction computes 16x8 output
+// 指定 CUDA SM 架构版本
+using SmArch = cutlass::arch::Sm80;  // 目标 Ampere 架构（计算能力 8.0）
 
 // =====================================================================
-// Performance Optimization Configuration
+// 分层计算的 Tile 配置
 // =====================================================================
-// This code section describes how threadblocks are scheduled on GPU
-// Swizzling improves L2 cache locality by changing threadblock scheduling pattern
+// 定义线程块（Thread Block）计算的 tile 大小
+// 形状：<M, N, K> = <128, 128, 32>
+using ThreadblockShape = cutlass::gemm::GemmShape<128, 128, 32>;  // 每个线程块计算 128x128 的输出 tile
+
+// 定义 Warp 计算的 tile 大小
+// 形状：<M, N, K> = <64, 64, 32>
+using WarpShape = cutlass::gemm::GemmShape<64, 64, 32>;  // 每个 warp 计算 64x64 的输出 tile
+
+// 定义 MMA 操作的大小
+// 形状：<M, N, K> = <16, 8, 16> - Ampere 的 mma.sync 指令形状
+using InstructionShape = cutlass::gemm::GemmShape<16, 8, 16>;  // 单个 Tensor Core 指令计算 16x8 的输出
+
+// =====================================================================
+// 性能优化配置
+// =====================================================================
+// 定义线程块在 GPU 上的调度方式
+// Swizzle 通过改变线程块调度模式来提高 L2 缓存局部性
 using SwizzleThreadBlock = cutlass::gemm::threadblock::GemmIdentityThreadblockSwizzle<8>;
 
-// Number of pipelines you want to use
-// More stages allow better latency hiding but use more shared memory
-constexpr int NumStages = 4;  // 4-stage pipeline for optimal Ampere performance
+// 流水线级数配置
+// 更多的级数可以更好地隐藏延迟，但会使用更多共享内存
+constexpr int NumStages = 4;  // 4 级流水线，为 Ampere 架构优化
 
 // =====================================================================
-// Reduction and Alignment Configuration
+// 归约和对齐配置
 // =====================================================================
-// Reduce A or B operand along the K dimension
-// true: reduces A to produce Mx1 vector (row sums of A)
-// false: reduces B to produce 1xN vector (column sums of B)
+// 选择沿 K 维度归约 A 还是 B 操作数
+// true: 归约 A 产生 Mx1 向量（A 的行和）
+// false: 归约 B 产生 1xN 向量（B 的列和）
 constexpr bool ReduceKForA = true;
 
-// Memory alignment requirements for vectorized loads
-// 8 elements = 128 bits for BF16 (16 bits per element)
-constexpr int AlignmentA = 8;  // A matrix must be aligned to 8 BF16 elements
-constexpr int AlignmentB = 8;  // B matrix must be aligned to 8 BF16 elements
+// 向量化加载的内存对齐要求
+// 8 个元素 = 128 位（BF16 每个元素 16 位）
+constexpr int AlignmentA = 8;  // A 矩阵必须对齐到 8 个 BF16 元素
+constexpr int AlignmentB = 8;  // B 矩阵必须对齐到 8 个 BF16 元素
 
 // =====================================================================
-// Epilogue Configuration
+// 后处理（Epilogue）配置
 // =====================================================================
-// This code section describes the epilogue part of the kernel
-// LinearCombination performs: D = alpha * accumulator + beta * C
+// 定义内核的后处理部分
+// LinearCombination 执行：D = alpha * accumulator + beta * C
 using EpilogueOp = cutlass::epilogue::thread::LinearCombination<
-    ElementOutput,                                        // Data type of output matrix (BF16)
-    128 / cutlass::sizeof_bits<ElementOutput>::value,     // Vector width = 128 bits / 16 bits = 8 elements
-                                                          // Determines elements per memory transaction
-    ElementAccumulator,                                   // Data type of accumulator (float)
-    ElementComputeEpilogue>;                             // Data type for epilogue computation (float)
+    ElementOutput,                                        // 输出矩阵数据类型（BF16）
+    128 / cutlass::sizeof_bits<ElementOutput>::value,     // 向量宽度 = 128 位 / 16 位 = 8 个元素
+                                                          // 决定每次内存事务的元素数
+    ElementAccumulator,                                   // 累加器数据类型（float）
+    ElementComputeEpilogue>;                             // 后处理计算数据类型（float）
 
 // =====================================================================
-// Main GEMM Kernel with K-Reduction
+// 带 K 维归约的主 GEMM 内核
 // =====================================================================
-// This specialized GEMM kernel performs matrix multiplication while simultaneously
-// reducing one operand along the K dimension
+// 这个特殊的 GEMM 内核在执行矩阵乘法的同时
+// 沿 K 维度归约一个操作数
 using Gemm = typename cutlass::gemm::device::GemmWithKReduction<
   ElementInputA, LayoutInputA,
   ElementInputB, LayoutInputB,
@@ -189,10 +193,10 @@ using Gemm = typename cutlass::gemm::device::GemmWithKReduction<
 >;
 
 // =====================================================================
-// Split-K Reduction Configuration
+// Split-K 归约配置
 // =====================================================================
-// Below is the reduction kernel used in the case of parallel split-k
-// Shape<4, 64> means 4 rows and 64 columns per reduction tile
+// 并行 split-k 情况下使用的归约内核
+// Shape<4, 64> 表示每个归约 tile 包含 4 行和 64 列
 using ReduceGemmSplitKShape = cutlass::MatrixShape<4, 64>;
 
 using ReduceOp = cutlass::reduction::thread::ReduceAdd<
@@ -211,7 +215,7 @@ using ReduceGemmSplitK = cutlass::reduction::device::ReduceSplitK<ReduceGemmSpli
 
 using ReduceVectorSplitKShape = cutlass::MatrixShape<1, 256>;
 
-// This code section describes the epilogue part of the kernel, we use default value
+// 定义内核的后处理部分，使用默认值
 using DummyEpilogueOp = cutlass::epilogue::thread::LinearCombination<
     ElementOutput,                                        // Data type of output matrix.
     128 / cutlass::sizeof_bits<ElementOutput>::value,     // The number of elements per vectorized.
@@ -232,9 +236,9 @@ using ReduceVectorSplitK = cutlass::reduction::device::ReduceSplitK<ReduceVector
 /////////////////////////////////////////////////////////////////////////////////////////////////
 
 // =====================================================================
-// Command Line Interface
+// 命令行接口
 // =====================================================================
-// Command line options parsing structure
+// 命令行选项解析结构体
 struct Options {
 
   bool help;
@@ -263,26 +267,26 @@ struct Options {
     beta(-1),
     benchmark(false) { }
 
-  // Verify the problem size is compatible with the CUTLASS implementation
+  // 验证问题大小是否与 CUTLASS 实现兼容
   bool valid() {
 
-    // CUTLASS uses 128-bit vector loads for BF16 elements (16 bits each)
-    // This requires all dimensions to be divisible by 8 elements (128/16 = 8)
-    // Misaligned accesses would cause performance degradation or errors
+    // CUTLASS 对 BF16 元素（每个 16 位）使用 128 位向量加载
+    // 这要求所有维度必须能被 8 个元素整除（128/16 = 8）
+    // 未对齐的访问会导致性能下降或错误
     int const kAlignment = 8;
 
     if ((problem_size.m() % kAlignment) ||
         (problem_size.n() % kAlignment) ||
         (problem_size.k() % kAlignment)) {
 
-      // misaligned tensors
+      // 张量未对齐
       return false;
     }
 
     return true;
   }
 
-  /// Updates input and filter sizes
+  /// 更新输入和过滤器大小
   void update(
     cutlass::gemm::GemmCoord problem_size,
     int split_k_slices,
@@ -293,7 +297,7 @@ struct Options {
     this->parallel_split_k = parallel_split_k;
   }
 
-  // Parses the command line
+  // 解析命令行参数
   void parse(int argc, char const **args) {
     cutlass::CommandLine cmd(argc, args);
 
@@ -333,7 +337,7 @@ struct Options {
     cmd.get_cmd_line_argument("tag", tag);
   }
 
-  /// Prints the usage statement.
+  /// 打印使用说明
   std::ostream & print_usage(std::ostream &out) const {
 
     out << "23_ampere_operand_gemm_reduction_fusion\n\n"
@@ -406,23 +410,22 @@ struct Result {
 
 /////////////////////////////////////////////////////////////////////////////////////////////////
 
-/// Runs one benchmark
+/// 运行一个基准测试
 Result profile(Options const &options) {
 
   Result result;
 
-  // Initialize tensors using CUTLASS helper functions
+  // 使用 CUTLASS 辅助函数初始化张量
   cutlass::HostTensor<ElementInputA, LayoutInputA> tensor_a(options.problem_size.mk());
   cutlass::HostTensor<ElementInputB, LayoutInputB> tensor_b(options.problem_size.kn());
 
 
-  // Create tensor C with dimensions 1x1x1xk which is the bias vector
+  // 创建张量 C，维度为 M x N
   cutlass::HostTensor<ElementOutput, LayoutOutput> tensor_c(options.problem_size.mn());
 
-  // Create tensor D used to store output from CUTLASS kernel
+  // 创建张量 D 用于存储 CUTLASS 内核的输出
   cutlass::HostTensor<ElementOutput, LayoutOutput> tensor_d(options.problem_size.mn());
-  // Create matrix D with dimensions M x N used to store output from reference
-  // kernel
+  // 创建矩阵 D，维度为 M x N，用于存储参考内核的输出
   cutlass::HostTensor<ElementOutput, LayoutOutput> tensor_ref_d(options.problem_size.mn());
 
   int reduce_vector_length = ReduceKForA ? options.problem_size.m() : options.problem_size.n();
@@ -430,38 +433,38 @@ Result profile(Options const &options) {
   cutlass::HostTensor<ElementOutput, LayoutGemmKReduction> tensor_reduction({reduce_vector_length, 1});
   cutlass::HostTensor<ElementOutput, LayoutGemmKReduction> tensor_ref_reduction({reduce_vector_length, 1});
 
-  // Fill input and output matrices on host using CUTLASS helper functions
+  // 使用 CUTLASS 辅助函数在主机上填充输入和输出矩阵
   cutlass::reference::host::TensorFillRandomUniform(
       tensor_a.host_view(),
       1997,
       ElementInputA(1),
       ElementInputA(-1),
-      0);  // <- Fill tensor A on host with uniform-distribution random data
+      0);  // <- 在主机上用均匀分布的随机数据填充张量 A
 
   cutlass::reference::host::TensorFillRandomUniform(
       tensor_b.host_view(),
       2003,
       ElementInputB(1),
       ElementInputB(-1),
-      0);  // <- Fill tensor B on host with uniform-distribution random data
+      0);  // <- 在主机上用均匀分布的随机数据填充张量 B
 
   cutlass::reference::host::TensorFillRandomUniform(
       tensor_c.host_view(),
       2017,
       ElementOutput(1),
       ElementOutput(-1),
-      0);  // <- Fill matrix C on host with uniform-distribution random data
+      0);  // <- 在主机上用均匀分布的随机数据填充矩阵 C
   cutlass::reference::host::TensorFill(
-      tensor_d.host_view());  // <- fill matrix D on host with zeros
+      tensor_d.host_view());  // <- 在主机上用零填充矩阵 D
   cutlass::reference::host::TensorFill(
-      tensor_ref_d.host_view());  // <- fill matrix D for reference on host with zeros
+      tensor_ref_d.host_view());  // <- 在主机上用零填充参考矩阵 D
 
   cutlass::reference::host::TensorFill(
-      tensor_reduction.host_view());  // <- fill matrix D on host with zeros
+      tensor_reduction.host_view());  // <- 在主机上用零填充归约向量
   cutlass::reference::host::TensorFill(
-      tensor_ref_reduction.host_view());  // <- fill matrix D for reference on host with zeros
+      tensor_ref_reduction.host_view());  // <- 在主机上用零填充参考归约向量
 
-  // Copy data from host to GPU
+  // 将数据从主机复制到 GPU
   tensor_a.sync_device();
   tensor_b.sync_device();
   tensor_c.sync_device();
@@ -469,7 +472,7 @@ Result profile(Options const &options) {
   tensor_ref_d.sync_device();
   tensor_reduction.sync_device();
 
-  // Initialize alpha for dot product computation
+  // 初始化点积计算的 alpha 值
   ElementComputeEpilogue alpha = options.parallel_split_k ? ElementComputeEpilogue(1)
                                                           : ElementComputeEpilogue(options.alpha);
   ElementComputeEpilogue beta = options.parallel_split_k ? ElementComputeEpilogue(0)
@@ -481,18 +484,18 @@ Result profile(Options const &options) {
 
   int batch_count = options.split_k_slices;
 
-  // Create a tuple of gemm kernel arguments. This is later passed as arguments to launch
-  // instantiated CUTLASS kernel
+  // 创建 GEMM 内核参数元组
+  // 这将作为参数传递给实例化的 CUTLASS 内核
   typename Gemm::Arguments arguments(
     mode,
     options.problem_size,
     batch_count,
     {alpha, beta},
-    tensor_a.device_ref().data(),              // <- reference to tensor A on device
-    tensor_b.device_ref().data(),              // <- reference to tensor B on device
-    tensor_c.device_ref().data(),              // <- reference to matrix C on device
-    tensor_d.device_ref().data(),              // <- reference to matrix D on device
-    tensor_reduction.device_ref().data(),      // <- reference to reduction tensor on device
+    tensor_a.device_ref().data(),              // <- 设备上张量 A 的引用
+    tensor_b.device_ref().data(),              // <- 设备上张量 B 的引用
+    tensor_c.device_ref().data(),              // <- 设备上矩阵 C 的引用
+    tensor_d.device_ref().data(),              // <- 设备上矩阵 D 的引用
+    tensor_reduction.device_ref().data(),      // <- 设备上归约张量的引用
     options.problem_size.m() * options.problem_size.k(),
     options.problem_size.n() * options.problem_size.k(),
     options.problem_size.m() * options.problem_size.n(),
@@ -504,30 +507,30 @@ Result profile(Options const &options) {
     tensor_d.layout().stride(0),
     tensor_reduction.layout().stride(0));
 
-  // Instantiate CUTLASS kernel depending on templates
+  // 根据模板实例化 CUTLASS 内核
   Gemm gemm_op;
 
-  // Using the arguments, query for extra workspace required for matrix multiplication computation
+  // 使用参数查询矩阵乘法计算所需的额外工作空间
   size_t workspace_size = Gemm::get_workspace_size(arguments);
 
-  // Allocate workspace memory
+  // 分配工作空间内存
   cutlass::device_memory::allocation<uint8_t> workspace(workspace_size);
 
-  // Check the problem size is supported or not
+  // 检查问题大小是否受支持
   result.status = gemm_op.can_implement(arguments);
   CUTLASS_CHECK(result.status);
 
-  // Initialize CUTLASS kernel with arguments and workspace pointer
+  // 使用参数和工作空间指针初始化 CUTLASS 内核
   result.status = gemm_op.initialize(arguments, workspace.get());
   CUTLASS_CHECK(result.status);
 
-  // Launch initialized CUTLASS kernel
+  // 启动已初始化的 CUTLASS 内核
   result.status = gemm_op();
 
   CUTLASS_CHECK(result.status);
 
   if (options.parallel_split_k && batch_count > 1) {
-    // reduce gemm
+    // 归约 GEMM 结果
 
     ElementComputeEpilogue alpha = ElementComputeEpilogue(options.alpha);
     ElementComputeEpilogue beta = ElementComputeEpilogue(options.beta);
@@ -561,7 +564,7 @@ Result profile(Options const &options) {
     result.status = reduce_gemm_splitk_op();
     CUTLASS_CHECK(result.status);
 
-    // reduce k vector
+    // 归约 K 维向量
     cutlass::layout::RowMajor splitk_vector_layout(reduce_vector_length);
    
     ElementOutput *workspace_vector_ptr = static_cast<ElementOutput *>(workspace_gemm_ptr) + batch_count * options.problem_size.m() * options.problem_size.n();
@@ -590,10 +593,10 @@ Result profile(Options const &options) {
   }
 
   //
-  // Create instantiation for device reference conv kernel
+  // 创建设备参考卷积内核的实例
   //
   if (options.reference_check) {
-    // Launch device reference to compute strictly the product A * B
+    // 启动设备参考内核来严格计算乘积 A * B
     cutlass::reference::device::Gemm<
         ElementInputA, 
         LayoutInputA, 
@@ -615,16 +618,16 @@ Result profile(Options const &options) {
         tensor_ref_d.device_ref()
       );
   
-    // Wait for kernels to finish
+    // 等待内核完成
     cudaDeviceSynchronize();
   
-    // Copy output data from CUTLASS and reference kernel to host for comparison
+    // 将 CUTLASS 和参考内核的输出数据复制到主机进行比较
     tensor_d.sync_host();
     tensor_ref_d.sync_host();
   
     tensor_reduction.sync_host();
   
-    // Reduce K in host code
+    // 在主机代码中执行 K 维归约
     if (ReduceKForA) {
       for (int m = 0; m < options.problem_size.m(); ++m) {
         for (int k = 0; k < options.problem_size.k(); ++k) {
@@ -641,7 +644,7 @@ Result profile(Options const &options) {
       }
     }
   
-    // Check if output from CUTLASS kernel and reference kernel are equal or not
+    // 检查 CUTLASS 内核和参考内核的输出是否相等
     bool pass = cutlass::reference::host::TensorEquals(tensor_d.host_view(),
                                                        tensor_ref_d.host_view());
 
@@ -685,7 +688,7 @@ Result profile(Options const &options) {
   }
  
   //
-  // Performance measurement
+  // 性能测量
   //
 
   if (options.measure_performance) {
@@ -700,34 +703,34 @@ Result profile(Options const &options) {
       }
     }
 
-    // Record an event at the start of a series of convolution operations.
+    // 在一系列卷积操作开始时记录事件
     result.error = cudaEventRecord(events[0]);
     if (result.error != cudaSuccess) {
       std::cerr << "cudaEventRecord() failed: " << cudaGetErrorString(result.error) << std::endl;
       return result;
     }
 
-    // Launch a sequence of implicit GEMM operations on the device
+    // 在设备上启动一系列隐式 GEMM 操作
     for (int iteration = 0; iteration < options.iterations; ++iteration) {
       result.status = gemm_op();
       CUTLASS_CHECK(result.status);
     }
 
-    // Record an event when the convolutions have been launched.
+    // 当卷积已启动时记录事件
     result.error = cudaEventRecord(events[1]);
     if (result.error != cudaSuccess) {
       std::cerr << "cudaEventRecord() failed: " << cudaGetErrorString(result.error) << std::endl;
       return result;
     }
 
-    // Wait for work on the device to complete.
+    // 等待设备上的工作完成
     result.error = cudaEventSynchronize(events[1]);
     if (result.error != cudaSuccess) {
       std::cerr << "cudaEventSynchronize() failed: " << cudaGetErrorString(result.error) << std::endl;
       return result;
     }
 
-    // Measure elapsed runtime
+    // 测量运行时间
     float runtime_ms = 0;
     result.error = cudaEventElapsedTime(&runtime_ms, events[0], events[1]);
     if (result.error != cudaSuccess) {
@@ -735,10 +738,10 @@ Result profile(Options const &options) {
       return result;
     }
 
-    // Print average runtime and GFLOPs.
+    // 打印平均运行时间和 GFLOPs
     result.runtime_ms = double(runtime_ms) / double(options.iterations);
 
-    // Cleanup
+    // 清理资源
     for (auto event : events) {
       (void)cudaEventDestroy(event);
     }
@@ -751,9 +754,9 @@ int main(int argc, char const **args) {
 
   bool notSupported = false;
 
-  // Ampere Tensor Core operations exposed with mma.sync are first available in CUDA 11.0.
+  // Ampere Tensor Core 操作通过 mma.sync 暴露，首次在 CUDA 11.0 中可用
   //
-  // CUTLASS must be compiled with CUDA 11 Toolkit to run Conv2dFprop examples.
+  // CUTLASS 必须使用 CUDA 11 工具包编译才能运行 Conv2dFprop 示例
   if (!(__CUDACC_VER_MAJOR__ > 11 || (__CUDACC_VER_MAJOR__ == 11 && __CUDACC_VER_MINOR__ >= 0))) {
     std::cerr << "Ampere Tensor Core operations must be compiled with CUDA 11.0 Toolkit or later." << std::endl;
     notSupported = true;
@@ -782,7 +785,7 @@ int main(int argc, char const **args) {
   }
 
   if (options.benchmark) {
-    // Benchmark several layers
+    // 基准测试多个层
 
     struct Benchmark {
       int m, n, k, split_k_slices, parallel_split_k;
@@ -805,7 +808,7 @@ int main(int argc, char const **args) {
     }
   } else { 
 
-    // Execute one problem size
+    // 执行一个问题大小
     if (!options.valid()) {
       std::cerr << "Invalid problem." << "\n";
       return -1;
