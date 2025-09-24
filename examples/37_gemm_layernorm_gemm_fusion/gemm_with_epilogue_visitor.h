@@ -29,12 +29,16 @@
  *
  **************************************************************************************************/
 /*! \file
-    \brief GEMM kernel to support the epilogue visitor model 
+    \brief GEMM kernel to support the epilogue visitor model
     for customized layernorm partial reduction epilogue fusion.
+    \brief 支持epilogue visitor模式的GEMM核函数，用于自定义LayerNorm部分规约epilogue融合
 
     This source file will likely be moved to `include/cutlass/gemm/kernel/` in the future once
     its usage has been stabilized. For now, it is included in this example to demonstrate
     some basic output fusion options.
+
+    这个源文件未来可能会移动到`include/cutlass/gemm/kernel/`目录中。
+    目前它包含在这个示例中，用于演示一些基本的输出融合选项。
 */
 
 #pragma once
@@ -56,10 +60,12 @@ namespace kernel {
 
 /////////////////////////////////////////////////////////////////////////////////////////////////
 
+// GEMM核函数，支持Epilogue Visitor模式
+// Epilogue Visitor是一种设计模式，允许在epilogue阶段执行自定义操作
 template <
-  typename Mma_,                  ///! Threadblock-scoped matrix multiply-accumulate
-  typename Epilogue_,             ///! Epilogue
-  typename ThreadblockSwizzle_    ///! Threadblock swizzling function
+  typename Mma_,                  ///! 线程块级别的矩阵乘累加单元
+  typename Epilogue_,             ///! Epilogue操作
+  typename ThreadblockSwizzle_    ///! 线程块交织函数（用于优化内存访问模式）
 >
 struct GemmWithEpilogueVisitor {
 public:
@@ -95,11 +101,13 @@ public:
   static int const kAlignmentB = Mma::IteratorB::AccessType::kElements;
   static int const kAlignmentC = EpilogueVisitor::kElementsPerAccess;
 
-  /// Warp count (concept: GemmShape)
+  /// Warp计数（GemmShape概念）
   using WarpCount = typename Mma::WarpCount;
+  // 线程总数 = 32线程/warp * warp数量
   static int const kThreadCount = 32 * WarpCount::kCount;
 
-  /// Split-K preserves splits that are 128b aligned
+  /// Split-K保持128位对齐的分割
+  // Split-K是一种将K维度分割成多个部分的优化技术
   static int const kSplitKAlignment = const_max(
     128 / sizeof_bits<ElementA>::value,
     128 / sizeof_bits<ElementB>::value
@@ -109,20 +117,20 @@ public:
   // Structures
   //
 
-  /// Argument structure
+  /// 参数结构体 - 包含从CPU传递到GPU的所有参数
   struct Arguments {
 
     //
-    // Data members
+    // 数据成员
     //
 
-    GemmUniversalMode mode;
-    GemmCoord problem_size;
+    GemmUniversalMode mode;              // GEMM模式（普通/批处理/Split-K等）
+    GemmCoord problem_size;              // 问题规模 [M, N, K]
 
-    TensorRefA ref_A;
-    TensorRefB ref_B;
+    TensorRefA ref_A;                    // 输入矩阵A的引用
+    TensorRefB ref_B;                    // 输入矩阵B的引用
 
-    typename EpilogueVisitor::Arguments epilogue_visitor;
+    typename EpilogueVisitor::Arguments epilogue_visitor;  // Epilogue visitor的参数
 
     //
     // Methods
@@ -155,23 +163,23 @@ public:
   // Structure for precomputing values in host memory and passing to kernels
   //
 
-  /// Parameters structure
+  /// 参数结构体 - 预计算的参数，直接传递给kernel
   struct Params {
 
-    cutlass::gemm::GemmCoord problem_size;
-    cutlass::gemm::GemmCoord grid_tiled_shape;
-    int swizzle_log_tile;
+    cutlass::gemm::GemmCoord problem_size;       // 问题规模
+    cutlass::gemm::GemmCoord grid_tiled_shape;   // Grid的tile形状
+    int swizzle_log_tile;                        // 交织的log tile大小
 
-    typename Mma::IteratorA::Params params_A;
-    typename Mma::IteratorB::Params params_B;
+    typename Mma::IteratorA::Params params_A;    // A矩阵迭代器参数
+    typename Mma::IteratorB::Params params_B;    // B矩阵迭代器参数
 
-    GemmUniversalMode mode;
-    int gemm_k_size;
+    GemmUniversalMode mode;                      // GEMM模式
+    int gemm_k_size;                             // K维度大小
 
-    void * ptr_A;
-    void * ptr_B;
+    void * ptr_A;                                // A矩阵指针
+    void * ptr_B;                                // B矩阵指针
 
-    typename EpilogueVisitor::Params epilogue_visitor;
+    typename EpilogueVisitor::Params epilogue_visitor;  // Epilogue visitor参数
 
     //
     // Methods
@@ -224,14 +232,15 @@ public:
     }
   };
 
-  /// Shared memory storage structure
+  /// 共享内存存储结构
+  // 使用union节省共享内存：主循环和epilogue不会同时使用
   union SharedStorage {
 
-    typename Mma::SharedStorage main_loop;
+    typename Mma::SharedStorage main_loop;        // 主循环使用的共享内存
 
     struct {
-      typename Epilogue::SharedStorage epilogue;
-      typename EpilogueVisitor::SharedStorage visitor;
+      typename Epilogue::SharedStorage epilogue;  // Epilogue使用的共享内存
+      typename EpilogueVisitor::SharedStorage visitor;  // Visitor使用的共享内存
     } epilogue;
   };
 
@@ -244,12 +253,14 @@ public:
   CUTLASS_DEVICE
   GemmWithEpilogueVisitor() { }
 
-  /// Determines whether kernel satisfies alignment
+  /// 检查kernel是否满足对齐要求
+  // 对齐是高性能的关键，不满足对齐要求会导致性能下降或错误
   static Status can_implement(
     cutlass::gemm::GemmCoord const & problem_size) {
 
     CUTLASS_TRACE_HOST("GemmWithEpilogueVisitor::can_implement()");
 
+    // 获取各个操作数的对齐要求
     static int const kAlignmentA = Mma::IteratorA::AccessType::kElements;
     static int const kAlignmentB = Mma::IteratorB::AccessType::kElements;
     static int const kAlignmentC = Epilogue::OutputTileIterator::kElementsPerAccess;
@@ -309,16 +320,17 @@ public:
     return can_implement(args.problem_size);
   }
 
-  /// Executes one GEMM
+  /// 执行一个GEMM操作
   CUTLASS_DEVICE
   void operator()(Params const &params, SharedStorage &shared_storage) {
 
-    // Compute threadblock location
+    // 计算线程块位置
+    // Swizzle技术用于打乱线程块执行顺序，减少内存bank冲突
     ThreadblockSwizzle threadblock_swizzle;
 
     cutlass::gemm::GemmCoord threadblock_tile_offset = threadblock_swizzle.get_tile_offset(params.swizzle_log_tile);
 
-    // Early exit if CTA is out of range
+    // 早期退出：如果CTA（线程块）超出范围
     if (params.grid_tiled_shape.m() <= threadblock_tile_offset.m() ||
       params.grid_tiled_shape.n() <= threadblock_tile_offset.n()) {
 
@@ -331,56 +343,62 @@ public:
     ElementA *ptr_A = static_cast<ElementA *>(params.ptr_A);
     ElementB *ptr_B = static_cast<ElementB *>(params.ptr_B);
 
-    // Compute initial location in logical coordinates
+    // 计算逻辑坐标中的初始位置
+    // 每个线程块处理A矩阵的一个[M, K]块
     cutlass::MatrixCoord tb_offset_A{
-      threadblock_tile_offset.m() * Mma::Shape::kM,
-      offset_k,
+      threadblock_tile_offset.m() * Mma::Shape::kM,  // M方向偏移
+      offset_k,                                       // K方向偏移
     };
 
+    // 每个线程块处理B矩阵的一个[K, N]块
     cutlass::MatrixCoord tb_offset_B{
-      offset_k,
-      threadblock_tile_offset.n() * Mma::Shape::kN
+      offset_k,                                       // K方向偏移
+      threadblock_tile_offset.n() * Mma::Shape::kN   // N方向偏移
     };
 
-    // Compute position within threadblock
+    // 计算线程在线程块内的位置
     int thread_idx = threadIdx.x;
 
-    // Construct iterators to A and B operands
+    // 构造A和B操作数的迭代器
+    // 迭代器负责从全局内存加载数据到共享内存
     typename Mma::IteratorA iterator_A(
       params.params_A,
       ptr_A,
-      {params.problem_size.m(), problem_size_k},
+      {params.problem_size.m(), problem_size_k},  // A矩阵形状
       thread_idx,
       tb_offset_A);
 
     typename Mma::IteratorB iterator_B(
       params.params_B,
       ptr_B,
-      {problem_size_k, params.problem_size.n()},
+      {problem_size_k, params.problem_size.n()},  // B矩阵形状
       thread_idx,
       tb_offset_B);
 
-    // Broadcast the warp_id computed by lane 0 to ensure dependent code
-    // is compiled as warp-uniform.
+    // 广播lane 0计算的warp_id，确保相关代码被编译为warp统一的
+    // Warp统一执行可以避免分支分歧，提高性能
     int warp_idx = __shfl_sync(0xffffffff, threadIdx.x / 32, 0);
 
+    // 计算线程在warp内的位置（0-31）
     int lane_idx = threadIdx.x % 32;
 
     //
-    // Main loop
+    // 主循环 - 执行矩阵乘法
     //
 
-    // Construct thread-scoped matrix multiply
+    // 构造线程级别的矩阵乘法对象
     Mma mma(shared_storage.main_loop, thread_idx, warp_idx, lane_idx);
 
+    // 定义累加器片段（存储部分结果）
     typename Mma::FragmentC accumulators;
 
+    // 清零累加器
     accumulators.clear();
 
-    // Compute threadblock-scoped matrix multiply-add
+    // 计算K维度的迭代次数
     int gemm_k_iterations = (problem_size_k - offset_k + Mma::Shape::kK - 1) / Mma::Shape::kK;
 
-    // Compute threadblock-scoped matrix multiply-add
+    // 执行线程块级别的矩阵乘累加
     mma(
       gemm_k_iterations,
       accumulators,
@@ -403,34 +421,39 @@ public:
     int block_idx = threadblock_tile_offset.m() + threadblock_tile_offset.n() * params.grid_tiled_shape.m();
 
     //
-    // Construct the epilogue visitor
+    // 构造epilogue visitor
+    // Visitor模式允许在epilogue阶段执行自定义操作
     //
 
     EpilogueVisitor epilogue_visitor(
       params.epilogue_visitor,
       shared_storage.epilogue.visitor,
-      params.problem_size.mn(),
+      params.problem_size.mn(),          // 输出矩阵大小
       thread_idx,
       warp_idx,
       lane_idx,
       threadblock_offset);
 
     if (params.mode == GemmUniversalMode::kGemm) {
-      // Indicate which position in a serial reduction the output operator is currently updating
+      // 指示在串行规约中输出操作器当前更新的位置
+      // 用于Split-K模式
       epilogue_visitor.set_k_partition(threadblock_tile_offset.k(), params.grid_tiled_shape.k());
     }
     else if (params.mode == GemmUniversalMode::kBatched || params.mode == GemmUniversalMode::kArray) {
+      // 设置批次索引（用于批处理GEMM）
       epilogue_visitor.set_batch_index(threadblock_tile_offset.k());
     }
 
-    // Construct the epilogue
+    // 构造epilogue对象
     Epilogue epilogue(
       shared_storage.epilogue.epilogue,
       thread_idx,
       warp_idx,
       lane_idx);
 
-    // Execute the epilogue operator to update the destination tensor.
+    // 执行epilogue操作器以更新目标张量
+    // 这里会调用epilogue_visitor的方法来完成自定义操作
+    // 对于LayerNorm融合，这里会计算部分和与部分平方和
     epilogue(epilogue_visitor, accumulators);
   }
 };

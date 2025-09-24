@@ -31,10 +31,15 @@
 
 /*! \file
     \brief A file contains all functioning classes needed by GemmLayernorm.
+    \brief 包含GemmLayernorm所需的所有功能类的文件
 
     GemmLayernorm example =  GEMM0 with partial reduction fused in epilogue (EpilogueVisitorLayerNorm)
                           +  lightweight full reduction kernel (ApplyFinalReduction)
                           +  GEMM1 with elemenwise operations fused in mainloop (GemmLayernormMainloopFusion)
+
+    GemmLayernorm示例 = GEMM0 在epilogue中融合部分规约（EpilogueVisitorLayerNorm）
+                      + 轻量级完全规约核函数（ApplyFinalReduction）
+                      + GEMM1 在主循环中融合逐元素操作（GemmLayernormMainloopFusion）
 
 */
 
@@ -71,13 +76,15 @@ namespace kernel {
 
 /////////////////////////////////////////////////////////////////////////////////////////////////
 
+// 完成LayerNorm的最终规约步骤，将部分和与部分平方和规约为最终的均值和方差
+// 这个kernel执行跨线程块的规约，完成LayerNorm的统计量计算
 template <
-  typename ElementVariance_,
-  typename ElementMean_,
-  typename ElementLayernormCompute_,
-  typename ElementOutput,
-  typename ThreadblockShape_,
-  bool IsShiftedVariance_ = false
+  typename ElementVariance_,           // 方差的数据类型
+  typename ElementMean_,                // 均值的数据类型
+  typename ElementLayernormCompute_,   // LayerNorm计算的数据类型（通常是float）
+  typename ElementOutput,               // 输出的数据类型
+  typename ThreadblockShape_,           // 线程块处理的矩阵块形状
+  bool IsShiftedVariance_ = false      // 是否使用偏移方差（数值稳定性）
 >
 class ApplyFinalReduction {
 public:
@@ -87,12 +94,15 @@ public:
   using ElementLayernormCompute = ElementLayernormCompute_;
   using ThreadblockShape = ThreadblockShape_;
 
-  // Pre-processing has ensured the layout equivalent to RowMajor
+  // 预处理已确保布局等同于RowMajor
+  // 注意：即使输入是ColumnMajor，也会在之前转置为RowMajor
   using Layout = cutlass::layout::RowMajor;
 
   using TensorVariance = TensorRef<ElementVariance, Layout>;
   using TensorMean = TensorRef<ElementMean, Layout>;
 
+  // 是否使用偏移方差技术来提高数值稳定性
+  // 偏移方差: Var(X-K) = E[(X-K)²] - E[X-K]²，其中K是偏移值
   static bool const kIsShiftedVariance = IsShiftedVariance_;
 
   //
@@ -101,10 +111,10 @@ public:
 
   struct Arguments {
 
-    MatrixCoord     extent;             ///< Extent of D and Layernorm matrices
-    TensorVariance  ref_Variance;       ///< Sum Square or Variance tensor (input / output)
-    TensorMean      ref_Mean;           ///< Sum or Mean tensor (input / output)
-    ElementOutput   *ptr_Shifted_K;     ///< Shifted K tensor pointer
+    MatrixCoord     extent;             ///< D和Layernorm矩阵的维度 [M, N]
+    TensorVariance  ref_Variance;       ///< 平方和或方差张量（输入/输出），存储各行的平方和
+    TensorMean      ref_Mean;           ///< 和或均值张量（输入/输出），存储各行的元素和
+    ElementOutput   *ptr_Shifted_K;     ///< 偏移K张量指针，用于数值稳定的方差计算
 
     //
     // Methods
@@ -161,18 +171,22 @@ public:
 
 private:
 
-  /// Partial reduction
+  /// 执行部分规约，完成LayerNorm的统计量计算
   CUTLASS_DEVICE
   void apply(Params const &params, SharedStorage &shared_storage) {
 
+    // 计算需要多少个线程块来处理所有列（K维度被分块）
     int threadblock_num = (params.args.extent.column() + ThreadblockShape::kM - 1) / ThreadblockShape::kM;
 
+    // 计算当前线程负责的行索引
     int block_n = blockIdx.x * blockDim.x;
 
     int thread_n = threadIdx.x;
 
+    // 全局行索引（每个线程处理一行）
     int idx_n = block_n + thread_n;
 
+    // 边界检查：超出行数的线程退出
     if (idx_n >= params.args.extent.row()) {
       return;
     }
@@ -197,42 +211,62 @@ private:
     ElementVariance *access_square_bak = access_square;
     ElementMean *access_mean_bak = access_mean;
 
+    // 初始化累加器：平方和与元素和
     ElementLayernormCompute frag_square_sum = ElementLayernormCompute(0);
     ElementLayernormCompute frag_element_sum = ElementLayernormCompute(0);
     ElementVariance fetch_square;
     ElementMean fetch_mean;
 
+    // 遍历所有线程块的部分结果，进行规约
+    // 每个线程块计算了一部分列的统计量，这里将它们加起来
     CUTLASS_PRAGMA_UNROLL
     for (int idx_m = 0; idx_m < threadblock_num; idx_m++) {
+      // 从全局内存加载部分平方和
       arch::global_load<ElementVariance, sizeof(ElementVariance)>(fetch_square, access_square, true);
+      // 从全局内存加载部分元素和
       arch::global_load<ElementMean, sizeof(ElementMean)>(fetch_mean, access_mean, true);
+      // 累加到总和中
       frag_element_sum += convert_mean(fetch_mean);
       frag_square_sum += convert_variance(fetch_square);
+      // 移动到下一个线程块的结果（跨行存储）
       access_square += params.args.extent.row();
       access_mean += params.args.extent.row();
     }
 
+    // 注意：这里的mean和square_mean还不是真正的均值，而是总和
+    // 真正的均值计算在后续步骤中完成
     ElementLayernormCompute mean = frag_element_sum;
     ElementLayernormCompute square_mean = frag_square_sum;
 
     ElementLayernormCompute variance;
 
+    // 计算方差的倒数（用于归一化）
+    // 使用公式: Var(X) = E[X²] - E[X]²
     if (kIsShiftedVariance && params.args.ptr_Shifted_K != nullptr) {
+      // 偏移方差版本：提高数值稳定性
       ElementOutput *access_shift_k = params.args.ptr_Shifted_K + idx_n;
       ElementOutput fetch_shift_k;
       ConvertShiftK convert_shift_k;
       arch::global_load<ElementOutput, sizeof(ElementOutput)>(fetch_shift_k, access_shift_k, true);
       ElementLayernormCompute shifted_mean =  mean - convert_shift_k(fetch_shift_k);
+      // 方差的倒数 = 1 / sqrt(E[(X-K)²] - E[X-K]² + eps)
       variance = cutlass::constants::one<ElementLayernormCompute>() / cutlass::fast_sqrt(square_mean - shifted_mean * shifted_mean + ElementLayernormCompute(1e-6));
     }else{
+      // 标准方差计算：1 / sqrt(E[X²] - E[X]² + eps)
+      // 注意：这里没有使用Welford方法，而是传统的两遍扫描方法
       variance = cutlass::constants::one<ElementLayernormCompute>() / cutlass::fast_sqrt(square_mean - mean * mean + ElementLayernormCompute(1e-6));
     }
 
+    // LayerNorm的变换是: (X - mean) * variance
+    // 这里预计算 -mean * variance，后续直接使用
     mean = -mean * variance;
 
+    // 恢复指针到原始位置
     access_square = access_square_bak;
     access_mean = access_mean_bak;
 
+    // 将计算结果写回全局内存
+    // 注意：这里存储的是方差的倒数（用于归一化）和预计算的-mean*variance
     access_square[0] = convert_variance_output(variance);
     access_mean[0] = convert_mean_output(mean);
 
@@ -243,17 +277,19 @@ private:
 
 /////////////////////////////////////////////////////////////////////////////////////////////////
 
+// Epilogue Visitor类用于在GEMM的epilogue阶段计算LayerNorm的部分统计量
+// 这个类在每个线程块处理其输出tile时，同时计算该tile对应行的元素和与平方和
 template <
-  typename ThreadblockShape_,
-  int ThreadCount,
-  typename OutputTileIterator_,
-  typename AccumulatorTile_,
-  typename ElementAccumulator_,
-  typename ElementVariance_,
-  typename ElementMean_,
-  typename ElementLayernormCompute_,
-  typename ElementwiseFunctor_,
-  bool IsShiftedVariance_ = false
+  typename ThreadblockShape_,           // 线程块处理的矩阵块形状
+  int ThreadCount,                      // 线程块中的线程数
+  typename OutputTileIterator_,         // 输出tile的迭代器类型
+  typename AccumulatorTile_,            // 累加器tile类型
+  typename ElementAccumulator_,         // 累加器元素类型
+  typename ElementVariance_,            // 方差元素类型
+  typename ElementMean_,                // 均值元素类型
+  typename ElementLayernormCompute_,    // LayerNorm计算类型（通常是float）
+  typename ElementwiseFunctor_,         // 逐元素操作函数对象
+  bool IsShiftedVariance_ = false      // 是否使用偏移方差
 >
 class EpilogueVisitorLayerNorm {
 public:
@@ -276,18 +312,22 @@ public:
 
   static int const kThreads = OutputTileIterator::ThreadMap::kThreads;
 
+  // 是否使用偏移方差技术
   static bool const kIsShiftedVariance = IsShiftedVariance_;
 
   using ElementOutput = typename OutputTileIterator::Element;
 
+  // 每个线程在行方向上的步进
   static int const kDeltaRow = OutputTileIterator::ThreadMap::Delta::kRow;
 
-  /// Array type used in Shift-K Layernorm
+  /// 用于Shift-K Layernorm的数组类型
+  // 每个线程需要访问的行数
   static int const kRowAccessCount = kIterations * kRowIterations;
 
+  // 存储偏移值K的片段
   using ConvertedShiftFragment = Array<ElementLayernormCompute, kRowAccessCount>;
 
-  // Conducts manual transpose externally (already supported) for column major
+  // 对于列主序，在外部进行手动转置（已支持）
   using LayoutOutput = cutlass::layout::RowMajor;
 
   using ElementAccumulator = ElementAccumulator_;
@@ -440,22 +480,23 @@ public:
 
   }
 
-  /// Called to set the batch index
+  /// 设置批次索引（用于批处理）
   CUTLASS_DEVICE
   void set_batch_index(int batch_idx) {
 
   }
 
-  /// Called at the start of the epilogue just before iterating over accumulator slices
+  /// 在epilogue开始时调用，在迭代累加器切片之前
   CUTLASS_DEVICE
   void begin_epilogue() {
 
-    // If shift-K feature is enabled, we load shift-k fragment
-    // at the very beginning of an epilogue
+    // 如果启用了shift-K特性，在epilogue开始时加载shift-k片段
+    // Shift-K技术通过减去一个偏移值K来提高数值稳定性
     if (kIsShiftedVariance && params_.ptr_Shifted_K != nullptr) {
       shift_k_frag_.clear();
       int thread_offset_row_base = iterator_D_.thread_start_row();
 
+      // 为每个线程加载所有需要的shift-k值
       CUTLASS_PRAGMA_UNROLL
       for (int iter_idx = 0; iter_idx < kIterations; ++iter_idx) {
         int step_offset = iter_idx * OutputTileIterator::Shape::kRow;
@@ -491,14 +532,14 @@ public:
 
   }
 
-  /// Called after accumulators have been exchanged for each accumulator vector
+  /// 访问每个累加器向量后调用，这是计算LayerNorm部分统计量的核心函数
   CUTLASS_DEVICE
   void visit(
-    int iter_idx,
-    int row_idx,
-    int column_idx,
-    int frag_idx,
-    AccumulatorFragment const &accum) {
+    int iter_idx,       // 迭代索引
+    int row_idx,        // 行索引
+    int column_idx,     // 列索引
+    int frag_idx,       // 片段索引
+    AccumulatorFragment const &accum) {  // 累加器片段
 
     using Mul = cutlass::multiplies<ElementLayernormCompute>;
     using Minus = cutlass::minus<ElementLayernormCompute>;
@@ -510,6 +551,7 @@ public:
 
     LayernormFragment result;
 
+    // 计算当前线程处理的全局坐标
     thread_offset_ =
       iterator_D_.thread_start() +
       OutputTileIterator::ThreadMap::iteration_offset(frag_idx);
@@ -517,8 +559,10 @@ public:
     NumericArrayConverter<ElementLayernormCompute, ElementOutput, kElementsPerAccess> source_converter;
     OutputVector &source_vector = reinterpret_cast<OutputVector *>(&fragment_C_)[frag_idx];
 
+    // 列边界检查
     bool column_guard = (thread_offset_.column() < extent_.column());
 
+    // 应用逐元素操作（如alpha缩放、beta加法等）
     if (elementwise_.kScale == cutlass::epilogue::thread::ScaleType::OnlyAlphaScaling) {
       result = source_converter(elementwise_(accum));
     }else{
@@ -526,13 +570,14 @@ public:
     }
 
 
+    // 计算1/N，用于求平均值
     ElementLayernormCompute inv_scalar = cutlass::constants::one<ElementLayernormCompute>() / ElementLayernormCompute(extent_.column());
 
-    // Fragment is cleared for non-reachable columns so no need to check against column guard
+    // 计算元素和（不需要列边界检查，因为越界的片段已被清零）
     accum_sum_element_ = element_sum_accumulator_(result);
 
-    // Square sum is different. Non-reachable columns should've been computed for shift-k
-    // Otherwise we will incorrectly have some extra k^2 added into square sum.
+    // 计算平方和（需要列边界检查）
+    // 对于shift-k，越界列不应该计算，否则会错误地添加额外的k^2
     if (column_guard) {
       accum_sum_square_ = (kIsShiftedVariance) ? \
                         square_sum_accumulator_(result, shift_k_frag_[iter_idx * kRowIterations + row_idx]) : \
@@ -542,10 +587,12 @@ public:
       accum_sum_square_ = ElementLayernormCompute(0);
     }
 
+    // 乘以1/N得到平均值
     accum_sum_element_ *= inv_scalar;
     accum_sum_square_ *= inv_scalar;
 
-    // After performing the in-thread reduction, we then perform cross-thread / in-warp reduction
+    // 线程内规约完成后，执行跨线程/warp内规约
+    // 使用shuffle指令在warp内的线程间进行规约
     CUTLASS_PRAGMA_UNROLL
     for (int i = kHalfThreadsPerRow; i > 0; i >>= 1) {
       accum_sum_element_ += __shfl_xor_sync(0xFFFFFFFF, accum_sum_element_, i);
@@ -558,7 +605,7 @@ public:
     output = output_converter(result);
   }
 
-  /// Called at the start of a row
+  /// 在行结束时调用，将统计量写入全局内存
   CUTLASS_DEVICE
   void end_row(int row_idx) {
 
@@ -568,17 +615,21 @@ public:
     ConvertVarianceOutput   convert_variance_output;
     ConvertMeanOutput  convert_mean_output;
 
+    // 只有每行的第一个线程负责写入（避免重复写入）
     bool is_write_thread = (thread_offset_.row() < extent_.row() && (threadIdx.x % kThreadsPerRow) == 0);
     int row_offset = thread_offset_.row() + blockIdx.y * extent_.row();
 
+    // 计算全局内存中的写入地址
     ElementVariance *curr_ptr_sum_square = params_.ptr_Variance + row_offset;
     ElementMean *curr_ptr_element_sum = params_.ptr_Mean + row_offset;
 
+    // 将平方和写入全局内存（部分规约结果）
     arch::global_store<ElementVariance, sizeof(ElementVariance)>(
               convert_variance_output(accum_sum_square_),
               (void *)curr_ptr_sum_square,
               is_write_thread);
 
+    // 将元素和写入全局内存（部分规约结果）
     arch::global_store<ElementMean, sizeof(ElementMean)>(
               convert_mean_output(accum_sum_element_),
               (void *)curr_ptr_element_sum,
@@ -618,6 +669,7 @@ private:
     return converted_shift_k_val;
   }
 
+  // 计算片段的平方和（标准版本）
   CUTLASS_DEVICE
   ElementLayernormCompute square_sum_accumulator_(LayernormFragment const &accum) {
     ElementLayernormCompute sum_ = ElementLayernormCompute(0);
@@ -625,32 +677,34 @@ private:
     CUTLASS_PRAGMA_UNROLL
     for (int i = 0; i < LayernormFragment::kElements; ++i) {
       auto accum_ = accum[i];
-      sum_ += accum_ * accum_;
+      sum_ += accum_ * accum_;  // 累加x²
     }
 
     return sum_;
   }
 
+  // 计算片段的平方和（偏移版本，用于数值稳定性）
   CUTLASS_DEVICE
   ElementLayernormCompute square_sum_accumulator_(LayernormFragment const &accum, ElementLayernormCompute shift_k_val) {
     ElementLayernormCompute sum_ = ElementLayernormCompute(0);
 
     CUTLASS_PRAGMA_UNROLL
     for (int i = 0; i < LayernormFragment::kElements; ++i) {
-      auto accum_ = accum[i] - shift_k_val;
-      sum_ += accum_ * accum_;
+      auto accum_ = accum[i] - shift_k_val;  // 减去偏移值K
+      sum_ += accum_ * accum_;  // 累加(x-K)²
     }
 
     return sum_;
   }
 
+  // 计算片段的元素和
   CUTLASS_DEVICE
   ElementLayernormCompute element_sum_accumulator_(LayernormFragment const &accum) {
     ElementLayernormCompute sum_ = ElementLayernormCompute(0);
 
     CUTLASS_PRAGMA_UNROLL
     for (int i = 0; i < LayernormFragment::kElements; ++i) {
-      sum_ += accum[i];
+      sum_ += accum[i];  // 累加x
     }
 
     return sum_;
@@ -664,22 +718,26 @@ private:
 
 /////////////////////////////////////////////////////////////////////////////////////////////////
 
-///
+/// GemmLayernorm类：实现Transformer中FFN层的融合操作
+/// 融合了三个操作：
+/// 1. GEMM0: 第一个矩阵乘法，并在epilogue中计算部分LayerNorm统计量
+/// 2. LayerNorm: 完成统计量规约并应用归一化
+/// 3. GEMM1: 第二个矩阵乘法，使用LayerNorm的结果作为输入
 template <
-  typename ElementInputA0_,
-  typename LayoutInputA0_,
-  typename ElementInputB0_,
-  typename LayoutInputB0_,
-  typename ElementOutput_,
-  typename LayoutOutput_,
-  typename ElementCompute_,
-  typename EpilogueFunctorOp_,
-  typename ThreadblockShape_,
-  typename WarpShape_,
-  typename InstructionShape_,
-  int Stages0,
-  int Stages1,
-  bool IsShiftedVariance_ = false
+  typename ElementInputA0_,       // GEMM0输入A的元素类型
+  typename LayoutInputA0_,        // GEMM0输入A的布局
+  typename ElementInputB0_,       // GEMM0输入B的元素类型
+  typename LayoutInputB0_,        // GEMM0输入B的布局
+  typename ElementOutput_,        // 输出元素类型
+  typename LayoutOutput_,         // 输出布局
+  typename ElementCompute_,       // 计算元素类型
+  typename EpilogueFunctorOp_,    // Epilogue函数对象
+  typename ThreadblockShape_,     // 线程块形状
+  typename WarpShape_,            // Warp形状
+  typename InstructionShape_,     // 指令形状（Tensor Core）
+  int Stages0,                    // GEMM0的流水线级数
+  int Stages1,                    // GEMM1的流水线级数
+  bool IsShiftedVariance_ = false // 是否使用偏移方差
 >
 class GemmLayernorm {
 public:
@@ -690,19 +748,21 @@ public:
   // Type definitions
   //
 
+  // 检查是否需要内部转置（当输出为列主序时）
   static bool const kInternalTranspose = cutlass::platform::is_same<LayoutOutput_, cutlass::layout::ColumnMajor>::value;
   static bool const kIsShiftedVariance = IsShiftedVariance_;
 
-  // These is mandatory layout.
+  // LayerNorm的scale和bias必须是行主序布局
   using LayoutInputScaleBias = cutlass::layout::RowMajor;
 
-  // These are mandatory data types.
+  // LayerNorm计算必须使用float以保证精度
   using ElementLayernormCompute = float;
+  // Scale和Bias使用half类型
   using ElementInputScaleBias = cutlass::half_t;
 
-  // These are mandatory params required by mainloop fusion
-  using OperatorClass       = cutlass::arch::OpClassTensorOp;
-  using ArchTag             = cutlass::arch::Sm80;
+  // 主循环融合需要的强制参数
+  using OperatorClass       = cutlass::arch::OpClassTensorOp;  // 使用Tensor Core
+  using ArchTag             = cutlass::arch::Sm80;             // Ampere架构
 
   // These are mandatory layouts and data types
   // that are inheritated from pre-defined params
@@ -843,40 +903,41 @@ using GemmMainloopFusion = typename cutlass::gemm::device::GemmLayernormMainloop
 
 public:
 
-  /// Arguments class
+  /// 参数结构体，包含所有三个操作的参数
   struct Arguments {
 
-    typename GemmEpilogueFusion::Arguments         gemm0;
-    typename GemmMainloopFusion::Arguments         gemm1;
-    typename ApplyFinalReductionKernel::Arguments reduction;
-    cutlass::gemm::GemmCoord extend;
+    typename GemmEpilogueFusion::Arguments         gemm0;      // GEMM0的参数
+    typename GemmMainloopFusion::Arguments         gemm1;      // GEMM1的参数
+    typename ApplyFinalReductionKernel::Arguments reduction;   // LayerNorm规约的参数
+    cutlass::gemm::GemmCoord extend;                          // 矩阵维度
 
     //
     // Methods
     //
     Arguments() { }
 
+    // 构造函数：初始化所有参数
     Arguments(
-      cutlass::gemm::GemmCoord problem_size0,
-      cutlass::gemm::GemmCoord problem_size1,
-      ElementInputA0 * ptr_A,
-      ElementInputB0 * ptr_B,
-      ElementOutputC0 * ptr_C,
-      ElementOutputC0 * ptr_D,
-      ElementOutputC0 * ptr_E,
-      ElementOutputC0 * ptr_O,
-      int64_t    ldm_A,
-      int64_t    ldm_B,
-      int64_t    ldm_C,
-      int64_t    ldm_D,
-      int64_t    ldm_E,
-      int64_t    ldm_O,
-      typename EpilogueFunctorOp::Params linear_scaling,
-      TensorVariance ref_Variance_,
-      TensorMean ref_Mean_,
-      TensorVariance ref_Gamma_,
-      TensorMean ref_Beta_,
-      ElementOutputC0 *ptr_Shifted_K = nullptr
+      cutlass::gemm::GemmCoord problem_size0,  // GEMM0的问题规模 [M, N, K]
+      cutlass::gemm::GemmCoord problem_size1,  // GEMM1的问题规模 [M, N, K]
+      ElementInputA0 * ptr_A,                  // GEMM0输入A指针
+      ElementInputB0 * ptr_B,                  // GEMM0输入B指针
+      ElementOutputC0 * ptr_C,                 // GEMM0输入C指针（bias）
+      ElementOutputC0 * ptr_D,                 // GEMM0输出指针
+      ElementOutputC0 * ptr_E,                 // GEMM1输入B指针
+      ElementOutputC0 * ptr_O,                 // 最终输出指针
+      int64_t    ldm_A,                        // A的leading dimension
+      int64_t    ldm_B,                        // B的leading dimension
+      int64_t    ldm_C,                        // C的leading dimension
+      int64_t    ldm_D,                        // D的leading dimension
+      int64_t    ldm_E,                        // E的leading dimension
+      int64_t    ldm_O,                        // O的leading dimension
+      typename EpilogueFunctorOp::Params linear_scaling,  // 线性缩放参数(alpha, beta)
+      TensorVariance ref_Variance_,            // 方差张量引用
+      TensorMean ref_Mean_,                    // 均值张量引用
+      TensorVariance ref_Gamma_,               // LayerNorm的Gamma参数（缩放）
+      TensorMean ref_Beta_,                    // LayerNorm的Beta参数（偏移）
+      ElementOutputC0 *ptr_Shifted_K = nullptr // 偏移K指针（可选）
     ):
       gemm0(
         cutlass::gemm::GemmUniversalMode::kGemm,
@@ -995,18 +1056,21 @@ public:
     return cutlass::Status::kSuccess;
   }
 
-  /// Run
+  /// 执行融合操作
   Status run(cudaStream_t stream) {
 
     //
-    // Launch the GEMM + layernorm kernel
+    // 第一步：启动GEMM0 + 部分LayerNorm规约的融合kernel
     //
 
+    // 计算Grid维度
     dim3 gemm_grid = SwizzleThreadBlock().get_grid_shape(params_.gemm0.grid_tiled_shape);
     dim3 gemm_block(GemmEpilogueFusion::kThreadCount, 1, 1);
 
+    // 计算共享内存大小
     int gemm_smem_size = int(sizeof(typename GemmEpilogueFusion::SharedStorage));
 
+    // 启动GEMM0 kernel
     cutlass::Kernel<GemmEpilogueFusion><<<gemm_grid, gemm_block, gemm_smem_size, stream>>>(params_.gemm0);
 
     cudaError_t result = cudaGetLastError();
@@ -1016,15 +1080,18 @@ public:
     }
 
     //
-    // Launch the ApplyFinalReductionKernel
+    // 第二步：启动最终规约kernel，完成LayerNorm统计量计算
     //
 
-    // always performs reduction from leading dimension
+    // 始终从主维度执行规约
+    // 如果是列主序，需要交换行列维度
     int leading_dim_0 = kInternalTranspose ? params_.extend.row() : params_.extend.column();
     int leading_dim_1 = kInternalTranspose ? params_.extend.column() : params_.extend.row();
 
+    // 动态选择线程块大小
     int thread_per_block = 128;
     int block_per_row = (leading_dim_1 + thread_per_block - 1) / thread_per_block;
+    // 如果块数太少，减小线程块大小以提高并行度
     if (block_per_row < 4) {
       thread_per_block = 32;
       block_per_row = (leading_dim_1 + thread_per_block - 1) / thread_per_block;
@@ -1033,6 +1100,7 @@ public:
     dim3 final_reduction_block(thread_per_block);
     dim3 final_reduction_grid(block_per_row);
 
+    // 启动规约kernel
     Kernel<ApplyFinalReductionKernel><<<
       final_reduction_grid, final_reduction_block, sizeof(typename ApplyFinalReductionKernel::SharedStorage), stream
     >>>(params_.reduction);
@@ -1044,7 +1112,8 @@ public:
     }
 
     //
-    // Launch the GEMM + mainloop fusion kernel
+    // 第三步：启动GEMM1 + LayerNorm应用的融合kernel
+    // 这个kernel在主循环中应用LayerNorm变换
     //
 
     cutlass::Status status = gemm_fusion_op();

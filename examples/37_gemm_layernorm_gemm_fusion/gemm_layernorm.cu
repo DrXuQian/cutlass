@@ -31,19 +31,30 @@
 
 /*! \file
     \brief CUTLASS Layernorm Example.
+    \brief CUTLASS LayerNorm示例
 
     This workload provides a layer normalization example using a one-pass, square-sum-based
-    variance calculation. Specifically, we fuse the reduction operation to find 
-    local mean and local square sum mean in the epilogue of 1st GEMM. After a light 
+    variance calculation. Specifically, we fuse the reduction operation to find
+    local mean and local square sum mean in the epilogue of 1st GEMM. After a light
     full reduction kernel, the mean / variance values are readily calculated for element-wise
     operations which are fused into the 2nd GEMM.
 
+    这个工作负载提供了一个使用单遍、基于平方和的方差计算的LayerNorm示例。
+    具体来说，我们在第一个GEMM的epilogue中融合规约操作来找到局部均值和局部平方和均值。
+    经过一个轻量级的完全规约核函数后，均值/方差值已经计算完毕，
+    可以用于融合到第二个GEMM中的逐元素操作。
+
     As stated in https://en.wikipedia.org/wiki/Algorithms_for_calculating_variance#Computing_shifted_data,
-    the square-sum based one-pass implementation may raise concerns on numerical stability issues. 
-    That being said, though this fully fused layernorm example almost perfectly hides all the memory cost to 
-    access the intermediate matrix for layernorm computation, the numerical issue might hinder a persuasive 
+    the square-sum based one-pass implementation may raise concerns on numerical stability issues.
+    That being said, though this fully fused layernorm example almost perfectly hides all the memory cost to
+    access the intermediate matrix for layernorm computation, the numerical issue might hinder a persuasive
     usage in real-world scenarios. If that is the case, a user may turn to the stand-alone CUTLASS layernorm
     example in tools/util/include/cutlass/util/device_layernorm.h
+
+    注意：基于平方和的单遍实现可能存在数值稳定性问题。
+    虽然这个完全融合的LayerNorm示例几乎完美地隐藏了访问LayerNorm计算中间矩阵的内存成本，
+    但数值问题可能会阻碍在实际场景中的使用。如果是这种情况，
+    用户可以转向使用独立的CUTLASS LayerNorm示例：tools/util/include/cutlass/util/device_layernorm.h
 
     Examples:
 
@@ -86,43 +97,46 @@
 
 /////////////////////////////////////////////////////////////////////////////////////////////////
 
+// 测试结果状态枚举
 enum class Disposition {
-  kPassed,
-  kIncorrect,
-  kNotVerified
+  kPassed,       // 测试通过
+  kIncorrect,    // 结果不正确
+  kNotVerified   // 未验证
 };
 
 /////////////////////////////////////////////////////////////////////////////////////////////////
 
-// Command line options parsing
+// 命令行选项解析
 template<typename LayoutOutput_>
 struct Options {
 
   using LayoutOutput = LayoutOutput_;
 
-  // Layout detection for transformer-style matrix configurations
+  // 检测Transformer风格矩阵配置的布局
+  // 列主序输出通常用于Transformer模型
   static bool const kIsColumnMajorOutput = cutlass::platform::is_same<LayoutOutput, cutlass::layout::ColumnMajor>::value;
 
-  bool help;
-  cutlass::gemm::GemmCoord problem_size0;
-  cutlass::gemm::GemmCoord problem_size1;
-  int hidden_dim;
-  int valid_word_num;
-  int intermediate_scale;
-  int iterations;
-  unsigned seed;
-  float alpha;
-  float beta;
-  bool verification_enabled;
-  double tolerance;
+  bool help;                                      // 是否显示帮助信息
+  cutlass::gemm::GemmCoord problem_size0;         // 第一个GEMM的问题规模
+  cutlass::gemm::GemmCoord problem_size1;         // 第二个GEMM的问题规模
+  int hidden_dim;                                 // 隐藏维度（Transformer中的d_model）
+  int valid_word_num;                              // 有效词数量（序列长度）
+  int intermediate_scale;                         // 中间层放大倍数（FFN中d_ff/d_model）
+  int iterations;                                  // 性能测试迭代次数
+  unsigned seed;                                   // 随机数种子
+  float alpha;                                     // GEMM的alpha参数
+  float beta;                                      // GEMM的beta参数
+  bool verification_enabled;                       // 是否启用验证
+  double tolerance;                                // 误差容忍度
 
+  // 默认构造函数，设置默认参数
   Options():
     help(false),
-    iterations(20),
+    iterations(20),              // 默认20次迭代
     seed(2022),
-    hidden_dim(768),
-    valid_word_num(4096),
-    intermediate_scale(4),
+    hidden_dim(768),              // 默认隐藏维度768（BERT-base配置）
+    valid_word_num(4096),         // 默认序列长度4096
+    intermediate_scale(4),        // FFN中间层放大4倍（标准Transformer配置）
     alpha(1),
     beta(0),
     verification_enabled(true),
@@ -151,20 +165,24 @@ struct Options {
     cmd.get_cmd_line_argument("tolerance", tolerance);
 
     if (kIsColumnMajorOutput) {
-      // column major output setup
+      // 列主序输出设置（适用于Transformer模型）
+      // GEMM0: [hidden_dim, hidden_dim] x [hidden_dim, valid_word_num] -> [hidden_dim, valid_word_num]
       problem_size0.m() = hidden_dim;
       problem_size0.n() = valid_word_num;
       problem_size0.k() = hidden_dim;
 
+      // GEMM1: [hidden_dim*scale, hidden_dim] x [hidden_dim, valid_word_num] -> [hidden_dim*scale, valid_word_num]
       problem_size1.m() = hidden_dim * intermediate_scale;
       problem_size1.n() = valid_word_num;
       problem_size1.k() = hidden_dim;
     }else{
-      // row major output setup
+      // 行主序输出设置
+      // GEMM0: [valid_word_num, hidden_dim] x [hidden_dim, hidden_dim] -> [valid_word_num, hidden_dim]
       problem_size0.m() = valid_word_num;
       problem_size0.n() = hidden_dim;
       problem_size0.k() = hidden_dim;
 
+      // GEMM1: [valid_word_num, hidden_dim] x [hidden_dim, hidden_dim*scale] -> [valid_word_num, hidden_dim*scale]
       problem_size1.m() = valid_word_num;
       problem_size1.n() = hidden_dim * intermediate_scale;
       problem_size1.k() = hidden_dim;
@@ -388,19 +406,19 @@ struct Testbed {
     
   }
 
-  /// Run
+  /// 运行测试
   Disposition run() {
 
     Disposition disposition = Disposition::kNotVerified;
 
     //
-    // Initialize the workspace
+    // 初始化工作空间
     //
 
     initialize();
 
     //
-    // Launch device kernel
+    // 启动设备核函数
     //
     cutlass::Status status = cutlass::Status::kSuccess;
 
@@ -419,12 +437,12 @@ struct Testbed {
     }
 
     //
-    // Compute the reference
+    // 计算参考结果
     //
     compute_reference();
 
     //
-    // Verify
+    // 验证结果
     //
 
     if (options.verification_enabled) {
@@ -440,7 +458,7 @@ struct Testbed {
     }
 
     //
-    // Profiling
+    // 性能分析
     //
     if (options.iterations) {
       profile();
@@ -449,17 +467,19 @@ struct Testbed {
     return disposition;
   }
 
-  /// Random initialization
+  /// 随机初始化数据
   void initialize() {
 
+    // 初始化第一个GEMM的输入A矩阵
     cutlass::reference::host::TensorFillRandomUniform(
       tensor_A0.host_view(),
         options.seed,
-        ElementInputA0(4),
-        ElementInputA0(-4),
+        ElementInputA0(4),        // 最大值
+        ElementInputA0(-4),       // 最小值
         0
       );
 
+    // 初始化第一个GEMM的输入B矩阵
     cutlass::reference::host::TensorFillRandomUniform(
       tensor_B0.host_view(),
         options.seed + 1,
@@ -468,6 +488,7 @@ struct Testbed {
         0
       );
 
+    // 初始化第二个GEMM的输入A矩阵（权重矩阵）
     cutlass::reference::host::TensorFillRandomUniform(
       tensor_A1.host_view(),
         options.seed + 2,
@@ -476,6 +497,7 @@ struct Testbed {
         0
       );
 
+    // 初始化LayerNorm的Beta参数（偏移）
     cutlass::reference::host::TensorFillRandomUniform(
       tensor_Beta.host_view(),
         options.seed + 3,
@@ -484,6 +506,7 @@ struct Testbed {
         0
       );
 
+    // 初始化LayerNorm的Gamma参数（缩放）
     cutlass::reference::host::TensorFillRandomUniform(
       tensor_Gamma.host_view(),
         options.seed + 4,
@@ -492,6 +515,7 @@ struct Testbed {
         0
       );
 
+    // 初始化偏移K值（用于数值稳定的方差计算）
     cutlass::reference::host::TensorFillRandomUniform(
       tensor_Shifted_K.host_view(),
         options.seed + 5,
@@ -500,6 +524,7 @@ struct Testbed {
         0
       );
 
+    // 将数据从主机同步到设备
     tensor_A0.sync_device();
     tensor_B0.sync_device();
     tensor_A1.sync_device();
@@ -510,59 +535,60 @@ struct Testbed {
 
 
 
+  // 执行设备核函数
   cutlass::Status execute_device_kernel() {
 
     cutlass::Status status = cutlass::Status::kSuccess;
 
     //
-    // Setup arguments
+    // 设置参数
     //
 
     typename GemmLayernorm::Arguments args(
-      options.problem_size0,
-      options.problem_size1,
-      tensor_A0.device_ref().data(),
-      tensor_B0.device_ref().data(),
-      tensor_C0.device_ref().data(),
-      tensor_C0.device_ref().data(),
-      tensor_A1.device_ref().data(),
-      tensor_C1.device_ref().data(),
-      tensor_A0.device_ref().stride(0),
-      tensor_B0.device_ref().stride(0),
-      tensor_C0.device_ref().stride(0),
-      tensor_C0.device_ref().stride(0),
-      tensor_A1.device_ref().stride(0),
-      tensor_C1.device_ref().stride(0),
+      options.problem_size0,                    // GEMM0问题规模
+      options.problem_size1,                    // GEMM1问题规模
+      tensor_A0.device_ref().data(),           // GEMM0输入A
+      tensor_B0.device_ref().data(),           // GEMM0输入B
+      tensor_C0.device_ref().data(),           // GEMM0输入C（bias）
+      tensor_C0.device_ref().data(),           // GEMM0输出D
+      tensor_A1.device_ref().data(),           // GEMM1输入B
+      tensor_C1.device_ref().data(),           // 最终输出
+      tensor_A0.device_ref().stride(0),        // A0的leading dimension
+      tensor_B0.device_ref().stride(0),        // B0的leading dimension
+      tensor_C0.device_ref().stride(0),        // C0的leading dimension
+      tensor_C0.device_ref().stride(0),        // D0的leading dimension
+      tensor_A1.device_ref().stride(0),        // A1的leading dimension
+      tensor_C1.device_ref().stride(0),        // C1的leading dimension
       {
-        ElementCompute(options.alpha),
-        ElementCompute(options.beta)
+        ElementCompute(options.alpha),          // alpha参数
+        ElementCompute(options.beta)            // beta参数
       },
-      tensor_Variance.device_ref(),
-      tensor_Mean.device_ref(),
-      tensor_Gamma.device_ref(),
-      tensor_Beta.device_ref(),
-      tensor_Shifted_K.device_ref().data()
+      tensor_Variance.device_ref(),            // 方差张量
+      tensor_Mean.device_ref(),                // 均值张量
+      tensor_Gamma.device_ref(),               // LayerNorm Gamma
+      tensor_Beta.device_ref(),                // LayerNorm Beta
+      tensor_Shifted_K.device_ref().data()     // 偏移K值
     );
 
     //
-    // Launch
+    // 启动核函数
     //
 
     GemmLayernorm gemm_layernorm;
 
-    // Initialize
+    // 初始化融合操作
     status = gemm_layernorm.initialize(args);
     if (status != cutlass::Status::kSuccess) {
       return status;
     }
 
-    // Run
+    // 执行融合的GEMM+LayerNorm+GEMM
     status = gemm_layernorm();
 
     return status;
   }
 
-  /// Reference calculation
+  /// 参考实现计算（用于验证正确性）
   void compute_reference() {
 
     cutlass::reference::device::Gemm<
