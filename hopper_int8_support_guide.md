@@ -237,6 +237,80 @@ using TmaElementA = cute::conditional_t<IsSubbyteA, uint8_t, SwappedElementA>;
    - 主要是类型分发
    - 设置 `TmaElementA/B = uint8_t`
 
+## Hopper 性能优化：Raster Order 和 Swizzle
+
+### Raster Order（遍历顺序）
+
+Raster Order 控制 CTA（线程块）如何遍历输出矩阵的 tiles。这直接影响内存访问模式和缓存利用率。
+
+**可选值**（来自 tile_scheduler_detail.hpp:38-47）：
+- `AlongM`：沿 M 维度优先遍历
+- `AlongN`：沿 N 维度优先遍历
+- `Heuristic`：自动选择（默认）
+
+**示例影响**：
+```
+假设输出矩阵分为 4×4 个 tiles：
+
+AlongM (行优先):          AlongN (列优先):
+[0  4  8  12]             [0  1  2  3]
+[1  5  9  13]             [4  5  6  7]
+[2  6  10 14]             [8  9  10 11]
+[3  7  11 15]             [12 13 14 15]
+```
+
+**性能影响**：
+- **AlongM**：适合 M >> N 的情况，保持 A 矩阵在 L2 缓存中
+- **AlongN**：适合 N >> M 的情况，保持 B 矩阵在 L2 缓存中
+
+### Swizzle Size（CTA 调度交织）
+
+Swizzle 通过重新排列 **CTA/threadblock 的调度顺序**，改善不同 CTA 之间的数据局部性和 L2 缓存利用率。
+
+**可选值**：1, 2, 4, 8（2的幂次）
+
+**工作原理**：
+```cpp
+// 来自 sm90_tile_scheduler_group.hpp:388-396
+offset = cluster_id & ((1 << log_swizzle_size) - 1);
+cluster_idx_minor = cluster_idx_minor_div_swizzle * (1 << log_swizzle_size) + offset;
+```
+
+**示例（swizzle_size=2）**：
+```
+无 Swizzle (顺序调度):    Swizzle=2 (交织调度):
+CTA执行顺序:              CTA执行顺序:
+[0  1  2  3]            [0  2  1  3]
+[4  5  6  7]            [4  6  5  7]
+[8  9  10 11]           [8  10 9  11]
+[12 13 14 15]           [12 14 13 15]
+```
+
+**性能影响**：
+- 交织的 CTA 调度顺序使得在时间上相邻执行的 CTA 在空间上更分散
+- 这可以改善 **L2 缓存** 的利用率，因为不同 CTA 访问的数据区域更分散
+- 避免多个 CTA 同时竞争相同的缓存行
+- 对于大矩阵特别有效，因为可以更好地利用有限的 L2 缓存容量
+
+### CUTLASS Profiler 中的使用
+
+```bash
+# 测试不同的配置组合
+./cutlass_profiler --operation=Gemm \
+                   --m=8192 --n=8192 --k=8192 \
+                   --raster_order=M,N,heuristic \
+                   --swizzle_size=1,2,4,8
+```
+
+### 性能调优建议
+
+1. **矩阵形状不对称时**：
+   - M >> N：使用 `--raster_order=M`
+   - N >> M：使用 `--raster_order=N`
+
+2. **大矩阵**：较大的 swizzle_size（4 或 8）通常更好
+3. **小矩阵**：较小的 swizzle_size（1 或 2）可能更合适
+
 ## 测试建议
 
 1. 从简单的 INT8×INT8→INT32 GEMM 开始
@@ -244,6 +318,7 @@ using TmaElementA = cute::conditional_t<IsSubbyteA, uint8_t, SwappedElementA>;
 3. 测试对齐要求（通常 16 字节）
 4. 验证溢出情况下的数值转换
 5. 与 FP8 对比性能，验证类似的性能表现
+6. **使用不同的 raster order 和 swizzle size 进行性能调优**
 
 ## 总结
 
