@@ -42,6 +42,9 @@ namespace cutlass::epilogue::fusion {
 //
 // FusionCallbacks - Dispatch Interface
 //
+// For detailed documentation with examples, see:
+//   docs/epilogue_fusion_architecture.md
+//
 // This is the bridge between:
 //   - FusionOperation (operations.hpp): Abstract definition of WHAT to compute
 //   - EVT Implementation (sm90_callbacks_*.hpp): Concrete HOW to compute
@@ -56,6 +59,19 @@ namespace cutlass::epilogue::fusion {
 // The CollectiveEpilogue receives FusionCallbacks as template parameter and calls:
 //   - fusion_callbacks.get_producer_load_callbacks() → pld_callbacks
 //   - fusion_callbacks.get_consumer_store_callbacks() → cst_callbacks
+//
+// Example:
+//   // Define fusion operation
+//   using FusionOp = fusion::LinearCombination<half_t, float, half_t>;
+//
+//   // FusionCallbacks dispatches to EVT implementation
+//   using Callbacks = FusionCallbacks<
+//       Sm90TmaWarpSpecialized<4, 4, 2, false, false>,  // DispatchPolicy
+//       FusionOp,                                        // Operation
+//       Shape<_128, _128, _64>,                          // CtaTile_MNK
+//       Shape<_64, _32>                                  // EpilogueTile_MN
+//   >;
+//   // → Resolves to Sm90EVT<Sm90Compute<multiply_add>, ...> internally
 //
 /////////////////////////////////////////////////////////////////////////////////////////////////
 

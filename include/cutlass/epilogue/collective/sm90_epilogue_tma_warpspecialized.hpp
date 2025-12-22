@@ -60,6 +60,9 @@ namespace collective {
 //
 // SM90 Epilogue TMA Warp-Specialized Collective
 //
+// For detailed documentation with examples, see:
+//   docs/epilogue_fusion_architecture.md
+//
 // Architecture:
 //   - Producer Load Warp (pld): TMA loads C matrix and auxiliary data (bias, scale) to SMEM
 //   - Consumer Store Warps (cst): Read from SMEM, perform fusion compute, write D to SMEM, TMA store
@@ -67,9 +70,19 @@ namespace collective {
 // Data Flow:
 //   GMEM(C) --TMA--> SMEM --S2R--> Register --Fusion--> Register --R2S--> SMEM --TMA--> GMEM(D)
 //
-// Pipeline Synchronization:
+// Pipeline Synchronization (see docs/pipeline_barrier_ptx_mapping.md):
 //   - Full Barrier: Producer signals data ready, Consumer waits
 //   - Empty Barrier: Consumer signals space free, Producer waits
+//
+// Example Usage:
+//   using EpilogueOp = fusion::LinCombPerRowBiasEltAct<ReLU, half_t, float, half_t>;
+//   using CollectiveEpilogue = CollectiveEpilogue<
+//       Sm90TmaWarpSpecialized<4, 4, 2, false, false>,  // 4 stages, fragment=2
+//       TileShape, EpilogueTile,
+//       ElementC, StrideC, ElementD, StrideD,
+//       FusionCallbacks<..., EpilogueOp, ...>,
+//       ...
+//   >;
 //
 /////////////////////////////////////////////////////////////////////////////////////////////////
 

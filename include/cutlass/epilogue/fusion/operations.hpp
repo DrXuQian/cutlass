@@ -44,6 +44,9 @@ namespace cutlass::epilogue::fusion {
 //
 // Fusion Operations - Abstract Definitions
 //
+// For detailed documentation with examples, see:
+//   docs/epilogue_fusion_architecture.md
+//
 // This file defines WHAT fusion operations are available (pure metadata).
 // The actual IMPLEMENTATION is in sm90_callbacks_tma_warpspecialized.hpp via EVT.
 //
@@ -57,10 +60,17 @@ namespace cutlass::epilogue::fusion {
 //   │   └── ... (many more variants)
 //   └── ...
 //
-// Usage:
-//   1. User selects a FusionOperation (e.g., LinCombPerRowBiasEltAct)
-//   2. FusionCallbacks<DispatchPolicy, Operation, ...> specialization maps to EVT
-//   3. EVT (Expression Visitor Tree) implements the actual computation
+// Usage Example:
+//   // Step 1: Select operation type
+//   using FusionOp = fusion::LinCombPerRowBiasEltAct<
+//       cutlass::epilogue::thread::ReLU,  // Activation function
+//       half_t,                            // Output element type
+//       float,                             // Compute type
+//       half_t                             // Bias element type
+//   >;
+//
+//   // Step 2: FusionCallbacks maps this to an EVT implementation
+//   // (see sm90_callbacks_tma_warpspecialized.hpp for the mapping)
 //
 /////////////////////////////////////////////////////////////////////////////////////////////////
 

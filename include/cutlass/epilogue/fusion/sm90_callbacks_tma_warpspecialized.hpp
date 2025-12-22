@@ -34,6 +34,9 @@
 
   This file maps FusionOperation types to EVT (Expression Visitor Tree) implementations.
 
+  For detailed documentation with examples, see:
+    docs/epilogue_fusion_architecture.md
+
   Architecture:
   ┌─────────────────────────────────────────────────────────────────────────────┐
   │                     FusionCallbacks Specialization                          │
