@@ -31,6 +31,37 @@
 
 /*! \file
   \brief Fusion callbacks specializations for the sm90 TMA warp-specialized (ws) epilogue
+
+  This file maps FusionOperation types to EVT (Expression Visitor Tree) implementations.
+
+  Architecture:
+  ┌─────────────────────────────────────────────────────────────────────────────┐
+  │                     FusionCallbacks Specialization                          │
+  │                                                                             │
+  │  Input: FusionCallbacks<Sm90TmaWarpSpecialized, LinearCombination, ...>    │
+  │                              ↓                                              │
+  │  Matches template specialization below                                      │
+  │                              ↓                                              │
+  │  Output: Inherits from Sm90EVT<...> which is an EVT implementation         │
+  │                                                                             │
+  │  EVT Structure for LinearCombination (D = α*acc + β*C):                    │
+  │                                                                             │
+  │                    Sm90Compute<multiply_add>    ← Root: β*C + α*acc        │
+  │                   /           |           \                                 │
+  │    Sm90ScalarBroadcast     Sm90SrcFetch    Sm90EVT<multiplies>             │
+  │         (β)                   (C)         /              \                  │
+  │                              Sm90ScalarBroadcast    Sm90AccFetch           │
+  │                                   (α)                  (acc)               │
+  │                                                                             │
+  └─────────────────────────────────────────────────────────────────────────────┘
+
+  EVT Nodes (from visitor files):
+  - Sm90AccFetch: Fetch accumulator from registers (leaf node)
+  - Sm90SrcFetch: Fetch C matrix from SMEM (leaf node)
+  - Sm90ScalarBroadcast: Broadcast scalar (α, β) to all elements (leaf node)
+  - Sm90RowBroadcast: Broadcast row vector (bias) (leaf node)
+  - Sm90Compute<Op>: Apply binary/unary operation (internal node)
+  - Sm90AuxStore: Store auxiliary output (can be chained)
 */
 
 #pragma once
@@ -54,10 +85,27 @@ namespace cutlass::epilogue::fusion {
 
 /////////////////////////////////////////////////////////////////////////////////////////////////
 
+// Sm90EVT: Expression Visitor Tree - composes fusion operations as a tree structure
+// Each node either fetches data (leaf) or performs computation (internal node)
 template <class NodeOp, class... ChildOps>
 using Sm90EVT = Sm90TreeVisitor<NodeOp, ChildOps...>;
 
+/////////////////////////////////////////////////////////////////////////////////////////////////
+//
+// FusionCallbacks Specializations
+//
+// Each specialization:
+//   1. Matches a specific (DispatchPolicy, Operation) pair
+//   2. Inherits from an EVT that implements the computation
+//   3. Defines an Arguments struct that maps user-friendly args to EVT args
+//
+/////////////////////////////////////////////////////////////////////////////////////////////////
+
 // D = alpha * acc
+// EVT Structure:
+//   Sm90Compute<multiplies>
+//   ├── Sm90ScalarBroadcast (alpha)
+//   └── Sm90AccFetch (acc)
 template <
   int StagesC,
   int StagesD,
@@ -77,45 +125,61 @@ struct FusionCallbacks<
     CtaTileShapeMNK,
     EpilogueTile
 > : Sm90EVT<Sm90Compute<multiplies, ElementOutput, ElementCompute, RoundStyle>,
-      Sm90ScalarBroadcast<ElementScalar, Stride<_0,_0,int64_t>>, 
-      Sm90AccFetch
+      Sm90ScalarBroadcast<ElementScalar, Stride<_0,_0,int64_t>>,  // alpha (scalar broadcast)
+      Sm90AccFetch                                                 // acc (from registers)
     > {
-  using Impl = 
+  using Impl =
     Sm90EVT<Sm90Compute<multiplies, ElementOutput, ElementCompute, RoundStyle>,
       Sm90ScalarBroadcast<ElementScalar, Stride<_0,_0,int64_t>>,
       Sm90AccFetch
     >;
   using Operation = fusion::ScaledAcc<ElementOutput, ElementCompute, ElementScalar, RoundStyle>;
 
+  // User-facing arguments - simplified interface
   struct Arguments {
-    // Give a name and flat ordering to the fusion callback args
-    ElementScalar alpha = ElementScalar(1);
-    ElementScalar beta = ElementScalar(0);
-    ElementScalar const* alpha_ptr = nullptr;
+    ElementScalar alpha = ElementScalar(1);      // Scale factor
+    ElementScalar beta = ElementScalar(0);       // Unused for ScaledAcc, kept for API compatibility
+    ElementScalar const* alpha_ptr = nullptr;    // Optional: load alpha from pointer
     ElementScalar const* beta_ptr = nullptr;
 
     using StrideAlpha = Stride<_0,_0,int64_t>;
-    StrideAlpha dAlpha = {_0{}, _0{}, 0};
+    StrideAlpha dAlpha = {_0{}, _0{}, 0};        // Stride for alpha (0,0,batch)
 
-    // Conversion to the args expected by the visitor implementation
-    // to_underlying_arguments will implicitly call this
+    // Implicit conversion to EVT Arguments
+    // Maps user args to the nested EVT node structure
     operator typename Impl::Arguments() const {
       return
-        {    // binary op : alpha * acc
-          {{alpha}, {alpha_ptr}, {dAlpha}}, // leaf args : alpha
-          {},                     // leaf args : acc
-          {} // binary args : multiplies
-        };   // end binary op
+        {    // Root: Sm90Compute<multiplies>
+          {{alpha}, {alpha_ptr}, {dAlpha}}, // Child 0: Sm90ScalarBroadcast args
+          {},                                // Child 1: Sm90AccFetch args (empty)
+          {}                                 // Compute args (empty for multiplies)
+        };
     }
   };
 
-  // Ctor inheritance
-  using Impl::Impl;
+  using Impl::Impl;  // Inherit constructors
 };
 
 /////////////////////////////////////////////////////////////////////////////////////////////////
 
 // D = alpha * acc + beta * C
+// EVT Structure (tree form):
+//
+//              Sm90Compute<homogeneous_multiply_add>   ← Root: computes β*C + (α*acc)
+//             /                |                  \
+//   Sm90ScalarBroadcast    Sm90SrcFetch    Sm90EVT<multiplies>
+//         (β)                  (C)        /              \
+//                             Sm90ScalarBroadcast    Sm90AccFetch
+//                                  (α)                  (acc)
+//
+// Execution order (post-order traversal):
+//   1. Sm90AccFetch: fetch acc from registers
+//   2. Sm90ScalarBroadcast(α): broadcast alpha
+//   3. Sm90Compute<multiplies>: compute α * acc
+//   4. Sm90SrcFetch: fetch C from SMEM (loaded by producer)
+//   5. Sm90ScalarBroadcast(β): broadcast beta
+//   6. Sm90Compute<homogeneous_multiply_add>: compute β*C + (α*acc)
+//
 template<
   class ElementOutput,
   class ElementCompute,
@@ -124,12 +188,12 @@ template<
   FloatRoundStyle RoundStyle = FloatRoundStyle::round_to_nearest
 >
 using Sm90LinearCombination =
-  Sm90EVT<Sm90Compute<homogeneous_multiply_add, ElementOutput, ElementCompute, RoundStyle>, // beta * C + (alpha * acc)
-    Sm90ScalarBroadcast<ElementScalar, Stride<_0,_0,int64_t>>, // beta
-    Sm90SrcFetch<ElementSource>, // C
-    Sm90EVT<Sm90Compute<multiplies, ElementCompute, ElementCompute, RoundStyle>, // alpha * acc
-      Sm90ScalarBroadcast<ElementScalar, Stride<_0,_0,int64_t>>, // alpha
-      Sm90AccFetch // acc
+  Sm90EVT<Sm90Compute<homogeneous_multiply_add, ElementOutput, ElementCompute, RoundStyle>,
+    Sm90ScalarBroadcast<ElementScalar, Stride<_0,_0,int64_t>>, // β (child 0)
+    Sm90SrcFetch<ElementSource>,                                // C (child 1)
+    Sm90EVT<Sm90Compute<multiplies, ElementCompute, ElementCompute, RoundStyle>,  // α*acc (child 2)
+      Sm90ScalarBroadcast<ElementScalar, Stride<_0,_0,int64_t>>, // α
+      Sm90AccFetch                                               // acc
     >
   >;
 

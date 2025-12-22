@@ -57,28 +57,43 @@ namespace epilogue {
 namespace collective {
 
 /////////////////////////////////////////////////////////////////////////////////////////////////
+//
+// SM90 Epilogue TMA Warp-Specialized Collective
+//
+// Architecture:
+//   - Producer Load Warp (pld): TMA loads C matrix and auxiliary data (bias, scale) to SMEM
+//   - Consumer Store Warps (cst): Read from SMEM, perform fusion compute, write D to SMEM, TMA store
+//
+// Data Flow:
+//   GMEM(C) --TMA--> SMEM --S2R--> Register --Fusion--> Register --R2S--> SMEM --TMA--> GMEM(D)
+//
+// Pipeline Synchronization:
+//   - Full Barrier: Producer signals data ready, Consumer waits
+//   - Empty Barrier: Consumer signals space free, Producer waits
+//
+/////////////////////////////////////////////////////////////////////////////////////////////////
 
 template <
-  int StagesC_,
-  int StagesD_,
-  int FragmentSize_,
-  bool ReuseSmemC_,
-  bool DelayTmaStore_,
-  class CtaTileMNK_,   //     (CTA_M,CTA_N,CTA_K)
-  class EpilogueTile_, // (EPI_TILE_M,EPI_TILE_N)
-  class ElementC_,
-  class StrideC_,
-  class ElementD_,
-  class StrideD_,
-  class FusionCallbacks_,
-  class CopyOpG2S_,
-  class SmemLayoutAtomC_,
-  class CopyOpS2R_,
-  class CopyOpS2G_,
-  class SmemLayoutAtomD_,
-  class CopyOpR2S_,
-  class CopyAtomC_,
-  class CopyOpR2R_
+  int StagesC_,           // Number of pipeline stages for loading C (SMEM buffer count)
+  int StagesD_,           // Number of pipeline stages for storing D
+  int FragmentSize_,      // Vectorization fragment size (typically 2 for FP16x2)
+  bool ReuseSmemC_,       // Reuse C's SMEM buffer for D (saves SMEM, requires careful sync)
+  bool DelayTmaStore_,    // Delay TMA store by one iteration (better instruction interleaving)
+  class CtaTileMNK_,      // CTA tile shape (CTA_M, CTA_N, CTA_K)
+  class EpilogueTile_,    // Epilogue subtile shape (EPI_TILE_M, EPI_TILE_N)
+  class ElementC_,        // C matrix element type (void = no C load, source-less epilogue)
+  class StrideC_,         // C matrix stride (M, N, L)
+  class ElementD_,        // D matrix element type (void = no D store)
+  class StrideD_,         // D matrix stride (M, N, L)
+  class FusionCallbacks_, // Fusion operation callbacks (defines D = f(acc, C, bias, ...))
+  class CopyOpG2S_,       // GMEM -> SMEM copy operation (TMA load)
+  class SmemLayoutAtomC_, // C's SMEM layout atom (for swizzling)
+  class CopyOpS2R_,       // SMEM -> Register copy operation
+  class CopyOpS2G_,       // SMEM -> GMEM copy operation (TMA store)
+  class SmemLayoutAtomD_, // D's SMEM layout atom (for swizzling)
+  class CopyOpR2S_,       // Register -> SMEM copy operation
+  class CopyAtomC_,       // C's copy atom (for partitioning)
+  class CopyOpR2R_        // Register -> Register transform (optional, for layout conversion)
 >
 class CollectiveEpilogue<
     Sm90TmaWarpSpecialized<StagesC_,StagesD_,FragmentSize_,ReuseSmemC_,DelayTmaStore_>,
@@ -186,13 +201,17 @@ private:
                          SmemArrayTypeD,
                          EmptyType>;
 
+  // SMEM storage strategies based on configuration:
+  // - CollectiveStorageWithC: C and D have separate SMEM buffers
+  // - CollectiveStorageWithoutC: Only D buffer (C is void, source-less epilogue)
+  // - CollectiveStorageReuseC: C and D share same SMEM (union), saves memory
   struct CollectiveStorageWithC {
     alignas(SmemAlignmentC) ArrayEngine<SmemElementC, cosize_v<SmemLayoutC>> smem_C;
     alignas(SmemAlignmentD) ArrayEngine<SmemElementD, cosize_v<SmemLayoutD>> smem_D;
   };
 
   union CollectiveStorageWithoutC {
-    cute::array<SmemElementC, 0> smem_C;
+    cute::array<SmemElementC, 0> smem_C;  // Empty placeholder
     alignas(SmemAlignmentD) ArrayEngine<SmemElementD, cosize_v<SmemLayoutD>> smem_D;
   };
 
@@ -202,31 +221,43 @@ private:
   };
 
 public:
-  // TMA pipeline for loading C
+  // Load Pipeline: Uses transaction-based async barrier for TMA loads
+  // - Full barrier with transaction counting (mbarrier.arrive.expect_tx / complete_tx)
+  // - Empty barrier for producer-consumer synchronization
   using LoadPipeline = cutlass::PipelineTransactionAsync<StagesC>;
   using LoadPipelineState = cutlass::PipelineState<StagesC>;
   constexpr static uint32_t TmaTransactionBytes =
     (size(take<0,2>(SmemLayoutC{})) * static_cast<uint32_t>(sizeof_bits<SmemElementC>::value)) / 8;
   constexpr static bool RequiresTransactionBytes = true;
 
-  // TMA pipeline for storing D
+  // Store Pipeline: Uses TMA store with scoreboarding (tma_store_arrive / tma_store_wait)
   using StorePipeline = cute::conditional_t<ReuseSmemC,
                           cutlass::PipelineTmaStore<StagesC, StagesD-1>,
                           cutlass::PipelineTmaStore<StagesD>>;
   using StorePipelineState = cutlass::PipelineState<ReuseSmemC ? StagesC : StagesD>;
 
+  // SharedStorage layout in SMEM:
+  // ┌─────────────────────────────────────────────┐
+  // │ TensorStorage                               │
+  // │ ├─ CollectiveStorage (smem_C, smem_D)       │
+  // │ └─ FusionStorage (bias, scale buffers)     │
+  // ├─────────────────────────────────────────────┤
+  // │ PipelineStorage                             │
+  // │ ├─ full_barrier_[StagesC]  (64-bit each)   │
+  // │ └─ empty_barrier_[StagesC] (64-bit each)   │
+  // └─────────────────────────────────────────────┘
   struct SharedStorage {
     struct TensorStorage {
       using CollectiveStorage = cute::conditional_t<not is_source_supported, CollectiveStorageWithoutC,
                                   cute::conditional_t<ReuseSmemC, CollectiveStorageReuseC, CollectiveStorageWithC>>;
-      CollectiveStorage collective;
+      CollectiveStorage collective;  // SMEM buffers for C and D matrices
 
       using FusionStorage = typename FusionCallbacks::SharedStorage;
-      FusionStorage thread;
+      FusionStorage thread;  // SMEM buffers for fusion data (bias, scale, aux)
     } tensors;
 
     using PipelineStorage = typename LoadPipeline::SharedStorage;
-    PipelineStorage pipeline;
+    PipelineStorage pipeline;  // mbarrier storage for producer-consumer sync
   };
   using TensorStorage = typename SharedStorage::TensorStorage;
   using PipelineStorage = typename SharedStorage::PipelineStorage;
@@ -416,6 +447,21 @@ public:
     return fusion_callbacks.is_producer_load_needed();
   }
 
+  //
+  // load() - Producer Load Warp Function
+  //
+  // Executed by: Producer Load Warp (pld)
+  // Purpose: TMA load C matrix and auxiliary data (bias, scale) from GMEM to SMEM
+  //
+  // Pipeline Protocol:
+  //   1. producer_acquire: wait(empty_barrier) + arrive_and_expect_tx(full_barrier)
+  //   2. TMA load: async copy GMEM -> SMEM
+  //   3. TMA completion: hardware auto-triggers complete_tx(full_barrier)
+  //
+  // Fusion Callbacks:
+  //   - pld_callbacks.begin(): pre-loop initialization
+  //   - pld_callbacks.step(): per-subtile operations (load bias, scale, aux)
+  //
   template<
     class ProblemShapeMNKL,
     class TileShapeMNK,
@@ -424,15 +470,16 @@ public:
   >
   CUTLASS_DEVICE auto
   load(
-      LoadPipeline load_pipeline,
-      LoadPipelineState load_pipe_producer_state,
-      ProblemShapeMNKL problem_shape_mnkl,
-      TileShapeMNK tile_shape_MNK,
-      TileCoordMNKL tile_coord_mnkl,
-      TiledMma tiled_mma,
-      int thread_idx,
-      TensorStorage& shared_tensors,
-      int subtile_idx=-1) {
+      LoadPipeline load_pipeline,                   // Pipeline interface for barrier operations
+      LoadPipelineState load_pipe_producer_state,   // Current producer state (stage index, phase)
+      ProblemShapeMNKL problem_shape_mnkl,          // Problem dimensions (M, N, K, L)
+      TileShapeMNK tile_shape_MNK,                  // Tile shape
+      TileCoordMNKL tile_coord_mnkl,                // Current tile coordinates
+      TiledMma tiled_mma,                           // MMA configuration for partitioning
+      int thread_idx,                               // Thread ID within CTA
+      TensorStorage& shared_tensors,                // SMEM storage
+      int subtile_idx=-1)                           // Optional: process only specific subtile
+  {
     using namespace cute;
 
     // Indexing variables
@@ -478,6 +525,7 @@ public:
     // Pre-loop fusion callback entry point
     pld_callbacks.begin();
 
+    // Loop over epilogue subtiles (CTA tile divided by EpilogueTile)
     CUTLASS_PRAGMA_UNROLL
     for (int epi_n = 0; epi_n < size<3>(gC_epi); ++epi_n) {
       CUTLASS_PRAGMA_UNROLL
@@ -485,22 +533,29 @@ public:
         if (subtile_idx != -1 && (epi_n * static_cast<int>(size<2>(gC_epi)) + epi_m) != subtile_idx) {
           continue;
         }
-        // Acquire the lock for this stage
+
+        // Step 1: Get barrier pointer for TMA to signal completion
         constexpr uint16_t mcast_mask = 0;
         uint64_t* tma_barrier = load_pipeline.producer_get_barrier(load_pipe_producer_state);
+
+        // Step 2: Acquire - wait for consumer to release SMEM, then set expected TX bytes
+        // PTX: wait(empty_barrier, phase) + arrive_and_expect_tx(full_barrier, bytes)
         load_pipeline.producer_acquire(load_pipe_producer_state);
 
-        // Loop fusion callback entry point
+        // Step 3: Fusion callback - load auxiliary data (bias, scale) via TMA
         pld_callbacks.step(tma_barrier, epi_m, epi_n, load_pipe_producer_state.count(), issue_tma_load);
 
-        // Execute the TMA load for C if needed
+        // Step 4: TMA load C matrix if needed
         if (issue_tma_load && is_C_load_needed) {
+          // TMA async copy: GMEM -> SMEM
+          // On completion, hardware auto-executes: complete_tx(full_barrier, bytes)
           copy(params.tma_load_c.with(*tma_barrier, mcast_mask),
               bGS_gC(_,_,_,epi_m,epi_n), bGS_sC(_,_,_,load_pipe_producer_state.index()));
           load_pipeline.producer_expect_transaction(load_pipe_producer_state);
         }
 
-        // Commit TMA loads for this stage and release the lock
+        // Step 5: Commit - signal that producer has issued all TMA loads for this stage
+        // Note: Actual barrier flip happens when TMA completes (hardware complete_tx)
         load_pipeline.producer_commit(load_pipe_producer_state);
         ++load_pipe_producer_state;
       }
@@ -524,6 +579,33 @@ public:
     return load_pipe_producer_state;
   }
 
+  //
+  // store() - Consumer Store Warps Function
+  //
+  // Executed by: Consumer Store Warps (cst) - typically MMA warp groups
+  // Purpose: Read C from SMEM, perform fusion compute, write D to SMEM, TMA store to GMEM
+  //
+  // Data Flow:
+  //   SMEM(C) --S2R--> Reg(C) --+
+  //                             +--> Fusion Compute --> Reg(D) --R2S--> SMEM(D) --TMA--> GMEM(D)
+  //   Reg(Acc) -----------------+
+  //
+  // Pipeline Protocol:
+  //   Load Pipeline (as consumer):
+  //     1. consumer_wait: wait(full_barrier, phase) - wait for producer to fill SMEM
+  //     2. consumer_release: arrive(empty_barrier) - signal producer SMEM is free
+  //   Store Pipeline (as producer):
+  //     1. producer_acquire: tma_store_wait<N> - wait for previous stores to complete
+  //     2. producer_commit: tma_store_arrive - signal TMA store issued
+  //
+  // Fusion Callbacks:
+  //   - cst_callbacks.begin(): pre-loop initialization
+  //   - cst_callbacks.begin_loop(): per-subtile start
+  //   - cst_callbacks.previsit(): before visit, SMEM->Reg for bias/scale
+  //   - cst_callbacks.visit(): CORE COMPUTE - D = f(acc, C, bias, ...)
+  //   - cst_callbacks.tma_store(): before TMA store
+  //   - cst_callbacks.end(): post-loop cleanup
+  //
   template<
     class ProblemShapeMNKL,
     class TileShapeMNK,
@@ -533,18 +615,19 @@ public:
   >
   CUTLASS_DEVICE auto
   store(
-      LoadPipeline load_pipeline,
-      LoadPipelineState load_pipe_consumer_state,
-      StorePipeline store_pipeline,
-      StorePipelineState store_pipe_producer_state,
-      ProblemShapeMNKL problem_shape_mnkl,
-      TileShapeMNK tile_shape_MNK,
-      TileCoordMNKL tile_coord_mnkl,
-      cute::Tensor<AccEngine,AccLayout> accumulators,
-      TiledMma tiled_mma,
-      int thread_idx,
-      TensorStorage& shared_tensors,
-      int subtile_idx=-1) {
+      LoadPipeline load_pipeline,                   // Load pipeline (for consumer_wait/release)
+      LoadPipelineState load_pipe_consumer_state,   // Consumer state for load pipeline
+      StorePipeline store_pipeline,                 // Store pipeline (for TMA store sync)
+      StorePipelineState store_pipe_producer_state, // Producer state for store pipeline
+      ProblemShapeMNKL problem_shape_mnkl,          // Problem dimensions
+      TileShapeMNK tile_shape_MNK,                  // Tile shape
+      TileCoordMNKL tile_coord_mnkl,                // Current tile coordinates
+      cute::Tensor<AccEngine,AccLayout> accumulators, // Accumulator from mainloop (in registers)
+      TiledMma tiled_mma,                           // MMA configuration
+      int thread_idx,                               // Thread ID
+      TensorStorage& shared_tensors,                // SMEM storage
+      int subtile_idx=-1)                           // Optional: process only specific subtile
+  {
     using namespace cute;
     using ElementAccumulator = typename AccEngine::value_type;
     using ElementCompute_ = typename epilogue::fusion::FusionCallbacksTraits<FusionCallbacks>::ElementCompute;
@@ -771,7 +854,7 @@ public:
     };
 
     //
-    // BEGIN EPILOGUE
+    // ==================== BEGIN EPILOGUE MAIN LOOP ====================
     //
 
     // Pre-loop fusion callback entry point
@@ -780,7 +863,8 @@ public:
       synchronize();
     }
 
-    // For each output tile
+    // Main loop: process each epilogue subtile
+    // CTA tile is divided into (EPI_M x EPI_N) subtiles
     CUTLASS_PRAGMA_UNROLL
     for (int epi_n = 0; epi_n < size<3>(gD_epi); ++epi_n) {
       CUTLASS_PRAGMA_UNROLL
@@ -792,28 +876,31 @@ public:
           continue;
         }
 
+        // Step 1: Begin loop callback
         cst_callbacks.begin_loop(epi_m, epi_n);
 
+        // Step 2: Wait for producer to load C into SMEM
         if (is_producer_load_needed) {
-          // Wait for the producer load to fill smem
+          // PTX: wait(full_barrier, phase) - blocks until producer signals data ready
           load_pipeline.consumer_wait(load_wait_state);
 
+          // Step 3: Copy C from SMEM to registers
           if (is_C_load_needed) {
-            // Copy source tile from smem to register
             copy(tiled_s2r, tSR_sC(_,_,_,load_wait_state.index()), tSR_rC);
-            // Ensure smem loads are complete before reusing smem for mixed types/layouts
             if constexpr (ReuseSmemC && not (SmemLayoutC{} == SmemLayoutD{})) {
               synchronize();
             }
           }
         }
 
-        // First loop fusion callback entry point
+        // Step 4: Previsit callback - load auxiliary data (bias, scale) from SMEM to registers
+        // This happens BEFORE visit() to prepare data for the main computation
         cst_callbacks.previsit(epi_m, epi_n, load_wait_state.count(), is_producer_load_needed);
 
+        // Step 5: Release SMEM buffer for producer to reuse (if not reusing C for D)
         if (is_producer_load_needed) {
           if constexpr (not ReuseSmemC) {
-            // Let producer load warp know smem buffers are consumed and empty
+            // PTX: arrive(empty_barrier) - signal producer that SMEM is free
             cutlass::arch::fence_view_async_shared();
             load_pipeline.consumer_release(load_pipe_consumer_state);
             ++load_pipe_consumer_state;
@@ -821,9 +908,11 @@ public:
           ++load_wait_state;
         }
 
+        // Step 6: CORE COMPUTATION - visit() callback
+        // Executes the fusion operation: D = f(acc, C, bias, scale, ...)
+        // This is where the EVT (Expression Visitor Tree) is evaluated
         if constexpr (epi_tile_m * epi_tile_n > mma_tile_m * mma_tile_n) {
-          // When the epilogue subtile is larger than the MMA tiles, loop over multiple
-          // MMA tiles
+          // Case: epilogue subtile > MMA tile, need nested loops
           static constexpr int MmaMPerEpiM = epi_tile_m / mma_tile_m;
           static constexpr int MmaNPerEpiN = epi_tile_n / mma_tile_n;
 
@@ -837,6 +926,7 @@ public:
               Tensor tRS_rAcc_frg_mn = tRS_rAcc_frg(_,mma_m,mma_n);
               int idx_in_epi_subtile = (mma_n_in_epi * MmaMPerEpiM + mma_m_in_epi);
 
+              // visit() computes: output = f(acc_fragment, ...)
               tRS_rCompute_frg(idx_in_epi_subtile) = cst_callbacks.visit(
                 tRS_rAcc_frg_mn(0), idx_in_epi_subtile, epi_m, epi_n);
             }

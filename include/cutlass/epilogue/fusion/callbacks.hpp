@@ -39,23 +39,41 @@
 namespace cutlass::epilogue::fusion {
 
 /////////////////////////////////////////////////////////////////////////////////////////////////
+//
+// FusionCallbacks - Dispatch Interface
+//
+// This is the bridge between:
+//   - FusionOperation (operations.hpp): Abstract definition of WHAT to compute
+//   - EVT Implementation (sm90_callbacks_*.hpp): Concrete HOW to compute
+//
+// Dispatch Flow:
+//   User specifies: FusionCallbacks<Sm90TmaWarpSpecialized, LinearCombination, ...>
+//                                      ↓
+//   Template specialization in sm90_callbacks_tma_warpspecialized.hpp matches
+//                                      ↓
+//   Maps to EVT: Sm90EVT<Sm90Compute<multiply_add>, Sm90ScalarBroadcast, Sm90SrcFetch, ...>
+//
+// The CollectiveEpilogue receives FusionCallbacks as template parameter and calls:
+//   - fusion_callbacks.get_producer_load_callbacks() → pld_callbacks
+//   - fusion_callbacks.get_consumer_store_callbacks() → cst_callbacks
+//
+/////////////////////////////////////////////////////////////////////////////////////////////////
 
-// Dispatch interface for epilogue fusion callbacks
-// For visitor fusions, this is just a convenience wrapper to provide metadata and non-nested args.
-// It is also valid to just pass visitor callbacks directly to the collective, e.g. fusion::Sm90LinearCombination,
-// provided the collective supports a visitor callbacks interface. This is useful for implementing custom fusions.
+// Primary template - static_assert fires if no specialization matches
 template <
-  class DispatchPolicy,  // specialize on collective's dispatch policy since callbacks API will depend on collective's algorithm
-  class Operation,       // the fusion operation being performed, e.g. fusion::LinearCombination
-  class CtaTile_MNK,     // computed tile per CTA
-  class EpilogueTile_MN, // epilogue subtile size
-  class... Args          // callbacks implementation dependent args (e.g. copy atoms, smem layouts)
+  class DispatchPolicy,  // Collective's dispatch policy (e.g., Sm90TmaWarpSpecialized)
+  class Operation,       // Fusion operation (e.g., LinearCombination, LinCombPerRowBias)
+  class CtaTile_MNK,     // CTA tile shape
+  class EpilogueTile_MN, // Epilogue subtile shape
+  class... Args          // Additional implementation-dependent args
 >
 struct FusionCallbacks {
-  static_assert(cutlass::detail::dependent_false<DispatchPolicy, Operation>, "Could not find a callbacks specialization.");
+  static_assert(cutlass::detail::dependent_false<DispatchPolicy, Operation>,
+    "Could not find a FusionCallbacks specialization. "
+    "Check that the Operation is supported for this DispatchPolicy.");
 };
 
-// Metadata helper to handle custom EVTs or other non-FusionCallbacks types
+// Traits helper to extract metadata from FusionCallbacks or custom EVT types
 template <class T>
 struct FusionCallbacksTraits {
   using DispatchPolicy = void;

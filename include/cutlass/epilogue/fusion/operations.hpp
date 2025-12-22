@@ -41,11 +41,35 @@
 namespace cutlass::epilogue::fusion {
 
 /////////////////////////////////////////////////////////////////////////////////////////////////
+//
+// Fusion Operations - Abstract Definitions
+//
+// This file defines WHAT fusion operations are available (pure metadata).
+// The actual IMPLEMENTATION is in sm90_callbacks_tma_warpspecialized.hpp via EVT.
+//
+// Hierarchy:
+//   FusionOperation (base)
+//   ├── ScaledAcc: D = α * acc
+//   ├── LinearCombination: D = α * acc + β * C
+//   │   ├── LinCombEltAct: D = activation(α * acc + β * C)
+//   │   ├── LinCombPerRowBias: D = α * acc + β * C + bias[row]
+//   │   ├── LinCombPerRowBiasEltAct: D = activation(α * acc + β * C + bias)
+//   │   └── ... (many more variants)
+//   └── ...
+//
+// Usage:
+//   1. User selects a FusionOperation (e.g., LinCombPerRowBiasEltAct)
+//   2. FusionCallbacks<DispatchPolicy, Operation, ...> specialization maps to EVT
+//   3. EVT (Expression Visitor Tree) implements the actual computation
+//
+/////////////////////////////////////////////////////////////////////////////////////////////////
 
 /////////////////////////////////////////////////////////////////////////////////////////////////
 //
-// Fusion Operations
-// Template args must not be implementation dependent
+// FusionOperation Base Class
+//
+// Defines metadata flags that describe what features an operation supports.
+// Derived classes override these to indicate their capabilities.
 //
 /////////////////////////////////////////////////////////////////////////////////////////////////
 
@@ -90,11 +114,16 @@ struct FusionOperation {
   using GmemLayoutTagScalefactor = void;
 };
 
+/////////////////////////////////////////////////////////////////////////////////////////////////
+// Concrete Fusion Operations
+/////////////////////////////////////////////////////////////////////////////////////////////////
+
 // D = alpha * acc
+// Simplest fusion: just scale the accumulator
 template<
-  class ElementOutput_,
-  class ElementCompute_,
-  class ElementScalar_ = ElementCompute_,
+  class ElementOutput_,   // Output element type (e.g., half_t)
+  class ElementCompute_,  // Compute type for internal operations (e.g., float)
+  class ElementScalar_ = ElementCompute_,  // Scalar type for alpha/beta
   FloatRoundStyle RoundStyle_ = FloatRoundStyle::round_to_nearest
 >
 struct ScaledAcc : FusionOperation {
@@ -106,22 +135,24 @@ struct ScaledAcc : FusionOperation {
 };
 
 // D = alpha * acc + beta * C
+// Classic GEMM epilogue: scale accumulator and add scaled source matrix
 template<
   class ElementOutput_,
   class ElementCompute_,
-  class ElementSource_ = ElementOutput_,
+  class ElementSource_ = ElementOutput_,  // Source (C) element type
   class ElementScalar_ = ElementCompute_,
   FloatRoundStyle RoundStyle_ = FloatRoundStyle::round_to_nearest
 >
 struct LinearCombination
     : ScaledAcc<ElementOutput_, ElementCompute_, ElementScalar_, RoundStyle_> {
   using ElementSource = ElementSource_;
-  static constexpr bool IsSourceSupported = true;
+  static constexpr bool IsSourceSupported = true;  // Enables C matrix loading
 };
 
 // D = activation(alpha * acc + beta * C)
+// Linear combination followed by element-wise activation (ReLU, GELU, etc.)
 template<
-  template <class> class ActivationFn_,
+  template <class> class ActivationFn_,  // Activation functor template (e.g., ReLU)
   class ElementOutput_,
   class ElementCompute_,
   class ElementSource_ = ElementOutput_,
@@ -131,7 +162,7 @@ template<
 struct LinCombEltAct
     : LinearCombination<ElementOutput_, ElementCompute_, ElementSource_, ElementScalar_, RoundStyle_> {
   using ActivationFn = ActivationFn_<ElementCompute_>;
-  static constexpr bool IsEltActSupported = true;
+  static constexpr bool IsEltActSupported = true;  // Enables activation function
 };
 
 // D = softmax(top_k(alpha * acc + beta * C))
