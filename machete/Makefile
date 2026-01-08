@@ -23,7 +23,9 @@ INCLUDES := -I$(CUTLASS_ROOT)/include \
 NVCC_FLAGS := -O3 \
               -std=c++17 \
               --expt-relaxed-constexpr \
-              -gencode arch=compute_90,code=sm_90
+              -gencode arch=compute_90,code=sm_90 \
+			  -arch=sm_90a \
+			  -DCUTLASS_ARCH_MMA_SM90_SUPPORTED
 
 # Linker flags
 LDFLAGS := -lcuda
@@ -32,10 +34,17 @@ LDFLAGS := -lcuda
 SRC := machete_gemm_example.cu
 TARGET := machete_gemm_example
 
+# NCU benchmark
+NCU_SRC := machete_ncu_bench.cu
+NCU_TARGET := machete_ncu_bench
+
 # Default target
-all: $(TARGET)
+all: $(TARGET) $(NCU_TARGET)
 
 $(TARGET): $(SRC)
+	$(NVCC) $(NVCC_FLAGS) $(INCLUDES) $< -o $@ $(LDFLAGS)
+
+$(NCU_TARGET): $(NCU_SRC)
 	$(NVCC) $(NVCC_FLAGS) $(INCLUDES) $< -o $@ $(LDFLAGS)
 
 # Run with default parameters (M=1, single token decode)
@@ -68,6 +77,13 @@ llama: $(TARGET)
 	./$(TARGET) --m=128 --n=4096 --k=11008 --g=128
 
 clean:
-	rm -f $(TARGET)
+	rm -f $(TARGET) $(NCU_TARGET)
 
-.PHONY: all run sweep llama clean
+# NCU profiling targets
+ncu-cpp: $(NCU_TARGET)
+	@echo "Run with: ncu --set full ./$(NCU_TARGET) --m=1 --n=2048 --k=2048 --g=128"
+
+ncu-py:
+	@echo "Run with: ncu --set full python vllm_machete_bench.py --m=1 --n=2048 --k=2048 --g=128"
+
+.PHONY: all run sweep llama clean ncu-cpp ncu-py
