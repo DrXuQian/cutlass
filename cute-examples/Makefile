@@ -19,13 +19,16 @@ NVCC_FLAGS = -std=c++17 \
              $(INCLUDES)
 
 # Host-only examples (no GPU kernel needed)
-HOST_EXAMPLES = retile_demo
+HOST_EXAMPLES = retile_demo layout_products_demo
 
 .PHONY: all clean
 
 all: $(HOST_EXAMPLES)
 
 retile_demo: retile_demo.cu
+	$(NVCC) $(NVCC_FLAGS) -o $@ $<
+
+layout_products_demo: layout_products_demo.cu
 	$(NVCC) $(NVCC_FLAGS) -o $@ $<
 
 clean:
