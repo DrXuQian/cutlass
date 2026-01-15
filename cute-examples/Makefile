@@ -24,8 +24,8 @@ HOST_EXAMPLES = retile_demo layout_products_demo
 # GPU examples
 GPU_EXAMPLES = mma_ldmatrix_sm80 mma_ldmatrix_real
 
-# SM90 examples (stmatrix)
-SM90_EXAMPLES = mma_ldmatrix_stmatrix
+# SM90 examples (Hopper)
+SM90_EXAMPLES = mma_ldmatrix_stmatrix wgmma_tma_warp_specialized_sm90
 
 .PHONY: all clean gpu sm90
 
@@ -49,6 +49,9 @@ mma_ldmatrix_real: mma_ldmatrix_real.cu
 
 mma_ldmatrix_stmatrix: mma_ldmatrix_stmatrix.cu
 	$(NVCC) $(NVCC_FLAGS) -arch=sm_90 -o $@ $<
+
+wgmma_tma_warp_specialized_sm90: wgmma_tma_warp_specialized_sm90.cu
+	$(NVCC) $(NVCC_FLAGS) -arch=sm_90a -o $@ $<
 
 clean:
 	rm -f $(HOST_EXAMPLES) $(GPU_EXAMPLES) $(SM90_EXAMPLES)
