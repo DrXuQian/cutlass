@@ -21,9 +21,19 @@ NVCC_FLAGS = -std=c++17 \
 # Host-only examples (no GPU kernel needed)
 HOST_EXAMPLES = retile_demo layout_products_demo
 
-.PHONY: all clean
+# GPU examples
+GPU_EXAMPLES = mma_ldmatrix_sm80 mma_ldmatrix_real
+
+# SM90 examples (stmatrix)
+SM90_EXAMPLES = mma_ldmatrix_stmatrix
+
+.PHONY: all clean gpu sm90
 
 all: $(HOST_EXAMPLES)
+
+gpu: $(GPU_EXAMPLES)
+
+sm90: $(SM90_EXAMPLES)
 
 retile_demo: retile_demo.cu
 	$(NVCC) $(NVCC_FLAGS) -o $@ $<
@@ -31,5 +41,14 @@ retile_demo: retile_demo.cu
 layout_products_demo: layout_products_demo.cu
 	$(NVCC) $(NVCC_FLAGS) -o $@ $<
 
+mma_ldmatrix_sm80: mma_ldmatrix_sm80.cu
+	$(NVCC) $(NVCC_FLAGS) -o $@ $<
+
+mma_ldmatrix_real: mma_ldmatrix_real.cu
+	$(NVCC) $(NVCC_FLAGS) -o $@ $<
+
+mma_ldmatrix_stmatrix: mma_ldmatrix_stmatrix.cu
+	$(NVCC) $(NVCC_FLAGS) -arch=sm_90 -o $@ $<
+
 clean:
-	rm -f $(HOST_EXAMPLES)
+	rm -f $(HOST_EXAMPLES) $(GPU_EXAMPLES) $(SM90_EXAMPLES)
