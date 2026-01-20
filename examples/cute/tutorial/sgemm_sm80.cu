@@ -41,6 +41,26 @@
 #include "cutlass/util/GPU_Clock.hpp"
 #include "cutlass/util/helper_cuda.hpp"
 
+#ifndef CUTE_SGEMM_SM80_PRINT_LAYOUT
+#define CUTE_SGEMM_SM80_PRINT_LAYOUT 0
+#endif
+
+namespace {
+constexpr bool kPrintLayouts = CUTE_SGEMM_SM80_PRINT_LAYOUT != 0;
+
+template <class Layout>
+void print_layout_debug(const char* name, Layout const& layout) {
+  printf("%s: ", name);
+  cute::print(layout);
+  printf("\n");
+  if constexpr (decltype(cute::rank(layout))::value == 2) {
+    cute::print_layout(layout);
+  } else {
+    printf("  (rank != 2, print_layout skipped)\n");
+  }
+}
+}  // namespace
+
 template <class ElementA,
           class ElementB,
           class SmemLayoutA,
@@ -355,10 +375,12 @@ gemm_tn(int m, int n, int k,
 
   // Define the smem layouts (static)
   // Swizzles for LDSM and 128b k-major loads
+  print_layout(Layout<Shape <_8,Shape <_8, _8>>,
+                                         Stride<_8,Stride<_1,_64>>>{});
   auto swizzle_atom = composition(Swizzle<3,3,3>{},
                                   Layout<Shape <_8,Shape <_8, _8>>,
                                          Stride<_8,Stride<_1,_64>>>{});
-
+  print_layout(swizzle_atom);
   auto sA = tile_to_shape(swizzle_atom, make_shape(bM,bK,bP));
   auto sB = tile_to_shape(swizzle_atom, make_shape(bN,bK,bP));
   auto sC = make_layout(make_shape(bM, bN));
@@ -376,17 +398,63 @@ gemm_tn(int m, int n, int k,
                                  Layout<Shape<_2,_2>>{},    // 2x2x1 MMA Atoms
                                  Tile<_32,_32,_16>{});      // 32x32x16 Tiled MMA for LDSM
 
-  //Copy_Atom<DefaultCopy, half_t> s2r_atom_A;
-  //Copy_Atom<UniversalCopy<half_t>, half_t> s2r_atom_A;
-  //Copy_Atom<SM75_U32x1_LDSM_N, half_t> s2r_atom_A;
-  //Copy_Atom<SM75_U32x2_LDSM_N, half_t> s2r_atom_A;
   Copy_Atom<SM75_U32x4_LDSM_N, half_t> s2r_atom_A;
-
-  //Copy_Atom<DefaultCopy, half_t> s2r_atom_B;
-  //Copy_Atom<UniversalCopy<half_t>, half_t> s2r_atom_B;
-  //Copy_Atom<SM75_U32x1_LDSM_N, half_t> s2r_atom_B;
-  //Copy_Atom<SM75_U32x2_LDSM_N, half_t> s2r_atom_B;
   Copy_Atom<SM75_U32x4_LDSM_N, half_t> s2r_atom_B;
+
+  if constexpr (kPrintLayouts) {
+    static bool printed = false;
+    if (!printed) {
+      printed = true;
+      printf("\n==== sgemm_sm80 layout dump (gemm_tn) ====\n");
+      printf("cta_tiler: "); print(cta_tiler); printf("\n");
+      print_layout_debug("swizzle_atom", swizzle_atom);
+      print_layout_debug("smem sA layout", sA);
+      print_layout_debug("smem sB layout", sB);
+      print_layout_debug("smem sC layout", sC);
+
+      printf("\n-- G2S TiledCopy (copyA/copyB) --\n");
+      print_layout_debug("copyA TiledLayout_TV", typename decltype(copyA)::TiledLayout_TV{});
+      printf("copyA Tiler_MN: "); print(typename decltype(copyA)::Tiler_MN{}); printf("\n");
+      print_layout_debug("copyA layout S_TV", decltype(copyA)::get_layoutS_TV());
+      print_layout_debug("copyA layout D_TV", decltype(copyA)::get_layoutD_TV());
+      print_layout_debug("copyB TiledLayout_TV", typename decltype(copyB)::TiledLayout_TV{});
+      printf("copyB Tiler_MN: "); print(typename decltype(copyB)::Tiler_MN{}); printf("\n");
+      print_layout_debug("copyB layout S_TV", decltype(copyB)::get_layoutS_TV());
+      print_layout_debug("copyB layout D_TV", decltype(copyB)::get_layoutD_TV());
+
+      using G2SCopyAtom = Copy_Atom<SM80_CP_ASYNC_CACHEALWAYS<uint128_t>, half_t>;
+      print_layout_debug("g2s atom ValLayoutSrc", typename G2SCopyAtom::ValLayoutSrc{});
+      print_layout_debug("g2s atom ValLayoutDst", typename G2SCopyAtom::ValLayoutDst{});
+      print_layout_debug("g2s atom ValLayoutRef", typename G2SCopyAtom::ValLayoutRef{});
+
+      printf("\n-- MMA Atom and TiledMMA --\n");
+      using MmaAtom = typename decltype(mmaC)::Atom;
+      print_layout_debug("mma atom LayoutA_TV", typename MmaAtom::LayoutA_TV{});
+      print_layout_debug("mma atom LayoutB_TV", typename MmaAtom::LayoutB_TV{});
+      print_layout_debug("mma atom LayoutC_TV", typename MmaAtom::LayoutC_TV{});
+      printf("mmaC thr_layout_vmnk: "); print(mmaC.get_thr_layout_vmnk()); printf("\n");
+      printf("mmaC tile_shape: "); print(tile_shape(mmaC)); printf("\n");
+      print_layout_debug("mmaC layoutA_TV", mmaC.get_layoutA_TV());
+      print_layout_debug("mmaC layoutB_TV", mmaC.get_layoutB_TV());
+      print_layout_debug("mmaC layoutC_TV", mmaC.get_layoutC_TV());
+
+      printf("\n-- S2R Copy Atom and TiledCopy --\n");
+      using S2RCopyAtom = decltype(s2r_atom_A);
+      print_layout_debug("s2r atom ValLayoutSrc", typename S2RCopyAtom::ValLayoutSrc{});
+      print_layout_debug("s2r atom ValLayoutDst", typename S2RCopyAtom::ValLayoutDst{});
+      print_layout_debug("s2r atom ValLayoutRef", typename S2RCopyAtom::ValLayoutRef{});
+      auto s2r_copy_a = make_tiled_copy_A(s2r_atom_A, mmaC);
+      auto s2r_copy_b = make_tiled_copy_B(s2r_atom_B, mmaC);
+      print_layout_debug("s2r_copy_a TiledLayout_TV", typename decltype(s2r_copy_a)::TiledLayout_TV{});
+      printf("s2r_copy_a Tiler_MN: "); print(typename decltype(s2r_copy_a)::Tiler_MN{}); printf("\n");
+      print_layout_debug("s2r_copy_a layout S_TV", decltype(s2r_copy_a)::get_layoutS_TV());
+      print_layout_debug("s2r_copy_a layout D_TV", decltype(s2r_copy_a)::get_layoutD_TV());
+      print_layout_debug("s2r_copy_b TiledLayout_TV", typename decltype(s2r_copy_b)::TiledLayout_TV{});
+      printf("s2r_copy_b Tiler_MN: "); print(typename decltype(s2r_copy_b)::Tiler_MN{}); printf("\n");
+      print_layout_debug("s2r_copy_b layout S_TV", decltype(s2r_copy_b)::get_layoutS_TV());
+      print_layout_debug("s2r_copy_b layout D_TV", decltype(s2r_copy_b)::get_layoutD_TV());
+    }
+  }
 
 #if 0
   print(copyA);
@@ -632,11 +700,11 @@ int main(int argc, char** argv)
   if (argc >= 4)
     sscanf(argv[3], "%d", &k);
 
-  char transA = 'N';
+  char transA = 'T';
   if (argc >= 5)
     sscanf(argv[4], "%c", &transA);
 
-  char transB = 'T';
+  char transB = 'N';
   if (argc >= 6)
     sscanf(argv[5], "%c", &transB);
 
