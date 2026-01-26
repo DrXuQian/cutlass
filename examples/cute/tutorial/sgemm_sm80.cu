@@ -31,6 +31,9 @@
 #include <cstdlib>
 #include <cstdio>
 #include <cassert>
+#include <cstring>
+#include <filesystem>
+#include <string>
 
 #include <thrust/host_vector.h>
 #include <thrust/device_vector.h>
@@ -40,6 +43,11 @@
 #include "cutlass/util/print_error.hpp"
 #include "cutlass/util/GPU_Clock.hpp"
 #include "cutlass/util/helper_cuda.hpp"
+
+#if !defined(_WIN32)
+#include <fcntl.h>
+#include <unistd.h>
+#endif
 
 #ifndef CUTE_SGEMM_SM80_PRINT_LAYOUT
 #define CUTE_SGEMM_SM80_PRINT_LAYOUT 0
@@ -54,10 +62,440 @@ void print_layout_debug(const char* name, Layout const& layout) {
   cute::print(layout);
   printf("\n");
   if constexpr (decltype(cute::rank(layout))::value == 2) {
-    cute::print_layout(layout);
+    if constexpr (cute::is_integral<decltype(layout(0, 0))>::value) {
+      cute::print_layout(layout);
+    } else {
+      printf("  (rank == 2 but codomain is not integral, print_layout skipped)\n");
+    }
   } else {
     printf("  (rank != 2, print_layout skipped)\n");
   }
+}
+
+#if !defined(_WIN32)
+class ScopedStdoutRedirect {
+ public:
+  explicit ScopedStdoutRedirect(std::string const& path) {
+    fflush(stdout);
+    saved_fd_ = ::dup(fileno(stdout));
+    if (saved_fd_ < 0) {
+      ok_ = false;
+      return;
+    }
+
+    int fd = ::open(path.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (fd < 0) {
+      ok_ = false;
+      return;
+    }
+
+    if (::dup2(fd, fileno(stdout)) < 0) {
+      ok_ = false;
+    }
+    ::close(fd);
+  }
+
+  ScopedStdoutRedirect(ScopedStdoutRedirect const&) = delete;
+  ScopedStdoutRedirect& operator=(ScopedStdoutRedirect const&) = delete;
+
+  ~ScopedStdoutRedirect() {
+    if (saved_fd_ < 0) {
+      return;
+    }
+    fflush(stdout);
+    (void)::dup2(saved_fd_, fileno(stdout));
+    ::close(saved_fd_);
+  }
+
+  bool ok() const { return ok_; }
+
+ private:
+  int saved_fd_{-1};
+  bool ok_{true};
+};
+
+template <class Fn>
+void dump_latex_to_file(std::string const& path, Fn&& fn) {
+  ScopedStdoutRedirect redirect(path);
+  if (!redirect.ok()) {
+    fprintf(stderr, "Failed to redirect stdout to %s\n", path.c_str());
+    return;
+  }
+  fn();
+  fflush(stdout);
+}
+#endif
+
+struct DumpOptions {
+  bool dump_layouts{false};
+  bool dump_latex{false};
+  std::string outdir{"."};
+  int m{128};
+  int n{128};
+  int k{64};
+};
+
+bool parse_dump_options(int argc, char** argv, DumpOptions* opts) {
+  for (int i = 1; i < argc; ++i) {
+    if (std::strcmp(argv[i], "--dump-layouts") == 0) {
+      opts->dump_layouts = true;
+      continue;
+    }
+    if (std::strcmp(argv[i], "--dump-latex") == 0) {
+      opts->dump_latex = true;
+      continue;
+    }
+    if (std::strcmp(argv[i], "--outdir") == 0 && i + 1 < argc) {
+      opts->outdir = argv[++i];
+      continue;
+    }
+    if (std::strcmp(argv[i], "--dump-m") == 0 && i + 1 < argc) {
+      opts->m = std::atoi(argv[++i]);
+      continue;
+    }
+    if (std::strcmp(argv[i], "--dump-n") == 0 && i + 1 < argc) {
+      opts->n = std::atoi(argv[++i]);
+      continue;
+    }
+    if (std::strcmp(argv[i], "--dump-k") == 0 && i + 1 < argc) {
+      opts->k = std::atoi(argv[++i]);
+      continue;
+    }
+  }
+  return opts->dump_layouts || opts->dump_latex;
+}
+
+void dump_sgemm_sm80_layouts(DumpOptions const& opts) {
+  using namespace cute;
+
+  using TA = half_t;
+  using TB = half_t;
+  using TC = half_t;
+
+  printf("==== sgemm_sm80.cu layout/algebra dump (host-only) ====\n");
+  printf("Reference problem M,N,K: (%d,%d,%d)\n", opts.m, opts.n, opts.k);
+  printf("NOTE: 这里仅构造 layout/tensor view，不会触发任何 CUDA kernel。\n\n");
+
+  // Problem shape (dynamic)
+  auto prob_shape = make_shape(opts.m, opts.n, opts.k);  // (M, N, K)
+
+  // Match gemm_tn() default in this file: transA='T', transB='N'
+  int ldA = opts.k;
+  int ldB = opts.k;
+  int ldC = opts.m;
+  auto dA = make_stride(ldA, Int<1>{});          // (dM, dK)
+  auto dB = make_stride(ldB, Int<1>{});          // (dN, dK)
+  auto dC = make_stride(Int<1>{}, ldC);          // (dM, dN)
+
+  printf("-- Global problem / strides --\n");
+  printf("shape_MNK: "); print(prob_shape); printf("\n");
+  printf("dA (MK):   "); print(dA);         printf("\n");
+  printf("dB (NK):   "); print(dB);         printf("\n");
+  printf("dC (MN):   "); print(dC);         printf("\n\n");
+
+  // CTA tile sizes (static)
+  auto bM = Int<128>{};
+  auto bN = Int<128>{};
+  auto bK = Int< 64>{};
+  auto bP = Int<3>{};  // Pipeline stages
+  auto cta_tiler = make_shape(bM, bN, bK);
+
+  printf("-- CTA tiler (static) --\n");
+  printf("cta_tiler: "); print(cta_tiler); printf("\n\n");
+
+  // Shared memory swizzle layout (static)
+  using SwizzleBase =
+      Layout<Shape<_8, Shape<_8, _8>>,
+             Stride<_8, Stride<_1, _64>>>;
+  SwizzleBase swizzle_base{};
+  auto swizzle_atom = composition(Swizzle<3,3,3>{}, swizzle_base);
+
+  auto sA_layout = tile_to_shape(swizzle_atom, make_shape(bM, bK, bP));
+  auto sB_layout = tile_to_shape(swizzle_atom, make_shape(bN, bK, bP));
+  auto sC_layout = make_layout(make_shape(bM, bN));
+
+  printf("-- Shared memory layouts (static) --\n");
+  print_layout_debug("swizzle_base", swizzle_base);
+  print_layout_debug("swizzle_atom", swizzle_atom);
+  print_layout_debug("sA layout (M,K,PIPE)", sA_layout);
+  print_layout_debug("sB layout (N,K,PIPE)", sB_layout);
+  print_layout_debug("sC layout (M,N)", sC_layout);
+  printf("\n");
+
+  // Thread-level G2S copies (static)
+  auto copyA = make_tiled_copy(
+      Copy_Atom<SM80_CP_ASYNC_CACHEALWAYS<uint128_t>, half_t>{},
+      Layout<Shape<_16,_8>,Stride<_8,_1>>{},   // 16x8 threads, k-major
+      Layout<Shape<_1,_8>>{});                 // 1x8 values
+  auto copyB = make_tiled_copy(
+      Copy_Atom<SM80_CP_ASYNC_CACHEALWAYS<uint128_t>, half_t>{},
+      Layout<Shape<_16,_8>,Stride<_8,_1>>{},   // 16x8 threads, k-major
+      Layout<Shape<_1,_8>>{});                 // 1x8 values
+
+  // MMA (static)
+  auto mmaC = make_tiled_mma(
+      SM80_16x8x16_F16F16F16F16_TN{},
+      Layout<Shape<_2,_2>>{},   // 2x2 atom arrangement
+      Tile<_32,_32,_16>{});     // overall tile (for permutation/ldsm friendliness)
+
+  // S2R copy atoms
+  Copy_Atom<SM75_U32x4_LDSM_N, half_t> s2r_atom_A;
+  Copy_Atom<SM75_U32x4_LDSM_N, half_t> s2r_atom_B;
+  auto s2r_copy_a = make_tiled_copy_A(s2r_atom_A, mmaC);
+  auto s2r_copy_b = make_tiled_copy_B(s2r_atom_B, mmaC);
+
+  printf("-- LDMATRIX CopyAtom (SM75_U32x4_LDSM_N) --\n");
+  {
+    using LdsAtom = decltype(s2r_atom_A);
+    print_layout_debug("ldmatrix ValLayoutSrc (thr,val)->offset", typename LdsAtom::ValLayoutSrc{});
+    print_layout_debug("ldmatrix ValLayoutDst (thr,val)->offset", typename LdsAtom::ValLayoutDst{});
+    print_layout_debug("ldmatrix ValLayoutRef (thr,val)->offset", typename LdsAtom::ValLayoutRef{});
+    auto src2ref = right_inverse(typename LdsAtom::ValLayoutRef{}).compose(typename LdsAtom::ValLayoutSrc{});
+    auto dst2ref = right_inverse(typename LdsAtom::ValLayoutRef{}).compose(typename LdsAtom::ValLayoutDst{});
+    printf("ldmatrix src2ref (src_tv->ref_tv): "); print(src2ref); printf("\n");
+    printf("ldmatrix dst2ref (dst_tv->ref_tv): "); print(dst2ref); printf("\n");
+
+	    printf("ldmatrix src2ref samples (src_tid,src_vid)->(ref_tid,(lane,reg)):\n");
+	    for (int tid = 0; tid < 32; tid += 8) {
+	      printf("  tid %2d : ", tid);
+	      for (int vid = 0; vid < 8; ++vid) {
+	        auto src_off = typename LdsAtom::ValLayoutSrc{}(tid, vid);
+	        auto ref_coord = typename LdsAtom::ValLayoutRef{}.get_hier_coord(src_off);
+	        auto rtid = get<0>(ref_coord);
+	        auto rlane = get<1,0>(ref_coord);
+	        auto rreg = get<1,1>(ref_coord);
+	        printf("(%2d,(%d,%d))%s", int(rtid), int(rlane), int(rreg), (vid == 7 ? "" : " "));
+	      }
+	      printf("\n");
+	    }
+	    printf("\n");
+	  }
+
+  printf("-- High-level TiledCopy / TiledMMA objects --\n");
+  printf("copyA: "); print(copyA); printf("\n");
+  printf("copyB: "); print(copyB); printf("\n");
+  printf("mmaC:  "); print(mmaC);  printf("\n\n");
+
+  // Dump the same internal layouts that are used by copy_atom.hpp / mma_atom.hpp.
+  printf("==== [copy_atom.hpp] make_tiled_copy() algebra (copyA) ====\n");
+  {
+    auto thr_layout = Layout<Shape<_16,_8>,Stride<_8,_1>>{};
+    auto val_layout = Layout<Shape<_1,_8>>{};
+    auto layout_mn  = raked_product(thr_layout, val_layout);
+    auto layout_tv  = right_inverse(layout_mn).with_shape(make_shape(size(thr_layout), size(val_layout)));
+    auto tiler      = product_each(shape(layout_mn));
+    print_layout_debug("thr_layout (m,n)->thr_idx", thr_layout);
+    print_layout_debug("val_layout (m,n)->val_idx", val_layout);
+    print_layout_debug("layout_mn  (m,n)->(thr,val)", layout_mn);
+    print_layout_debug("layout_tv  (thr,val)->(m,n)", layout_tv);
+    printf("tiler (TileM,TileN): "); print(tiler); printf("\n\n");
+  }
+
+  printf("==== [copy_atom.hpp] TiledCopy internals ====\n");
+  {
+    using CopyA = decltype(copyA);
+    print_layout_debug("copyA TiledLayout_TV", typename CopyA::TiledLayout_TV{});
+    printf("copyA Tiler_MN: "); print(typename CopyA::Tiler_MN{}); printf("\n");
+    print_layout_debug("copyA layout S_TV", CopyA::get_layoutS_TV());
+    print_layout_debug("copyA layout D_TV", CopyA::get_layoutD_TV());
+    printf("\n");
+
+    // Replicate tile2thrfrg() step-by-step (S side)
+    printf("-- tile2thrfrg() step-by-step (S) --\n");
+    using AtomLayoutRef = typename CopyA::AtomLayoutRef;
+    using AtomLayoutSrc = typename CopyA::AtomLayoutSrc;
+    auto src2ref = right_inverse(AtomLayoutRef{}).compose(AtomLayoutSrc{});
+    print_layout_debug("src2ref (src_tv)->(ref_tv)", src2ref);
+
+    auto atom_layout_TV = zipped_divide(typename CopyA::TiledLayout_TV{}, make_shape(typename CopyA::AtomNumThr{}, typename CopyA::AtomNumVal{}));
+    print_layout_debug("atom_layout_TV", atom_layout_TV);
+    auto src_layout_TV = atom_layout_TV.compose(src2ref, _);
+    print_layout_debug("src_layout_TV = atom_layout_TV.compose(src2ref,_)", src_layout_TV);
+    auto thrval2mn = coalesce(zip(src_layout_TV), Shape<_1,Shape<_1,_1>>{});
+    print_layout_debug("thrval2mn (coalesce(zip(src_layout_TV)))", thrval2mn);
+    printf("\n");
+
+    printf("-- tile2thrfrg() step-by-step (D) --\n");
+    using AtomLayoutDst = typename CopyA::AtomLayoutDst;
+    auto dst2ref = right_inverse(AtomLayoutRef{}).compose(AtomLayoutDst{});
+    print_layout_debug("dst2ref (dst_tv)->(ref_tv)", dst2ref);
+    auto dst_layout_TV = atom_layout_TV.compose(dst2ref, _);
+    print_layout_debug("dst_layout_TV = atom_layout_TV.compose(dst2ref,_)", dst_layout_TV);
+    auto thrval2mn_d = coalesce(zip(dst_layout_TV), Shape<_1,Shape<_1,_1>>{});
+    print_layout_debug("thrval2mn (coalesce(zip(dst_layout_TV)))", thrval2mn_d);
+    printf("\n");
+  }
+
+  printf("==== [mma_atom.hpp] TiledMMA internals ====\n");
+  {
+    using MmaAtom = typename decltype(mmaC)::Atom;
+    print_layout_debug("mma atom LayoutA_TV", typename MmaAtom::LayoutA_TV{});
+    print_layout_debug("mma atom LayoutB_TV", typename MmaAtom::LayoutB_TV{});
+    print_layout_debug("mma atom LayoutC_TV", typename MmaAtom::LayoutC_TV{});
+    printf("mmaC thr_layout_vmnk: "); print(mmaC.get_thr_layout_vmnk()); printf("\n");
+    printf("mmaC permutation_mnk: (");
+    print(mmaC.template permutation_mnk<0>()); printf(",");
+    print(mmaC.template permutation_mnk<1>()); printf(",");
+    print(mmaC.template permutation_mnk<2>()); printf(")\n");
+    printf("mmaC tile_shape: "); print(tile_shape(mmaC)); printf("\n\n");
+
+    // Reproduce thrfrg_C() algebra (see include/cute/atom/mma_atom.hpp)
+    printf("-- thrfrg_C() step-by-step --\n");
+    auto ref_C = make_layout(make_shape(mmaC.template tile_size_mnk<0>(), mmaC.template tile_size_mnk<1>()));
+    print_layout_debug("ref_C (M,N)->idx", ref_C);
+    auto t_tile_C = make_tile(mmaC.template permutation_mnk<0>(), mmaC.template permutation_mnk<1>());
+    printf("t_tile_C: "); print(t_tile_C); printf("\n");
+    auto t_tensor_C = logical_divide(ref_C, t_tile_C);
+    print_layout_debug("t_tensor_C = logical_divide(ref_C, t_tile_C)", t_tensor_C);
+    auto c_tile = make_tile(make_layout(size<0>(typename decltype(mmaC)::AtomShape_MNK{})),
+                            make_layout(size<1>(typename decltype(mmaC)::AtomShape_MNK{})));
+    printf("c_tile (AtomM,AtomN): "); print(c_tile); printf("\n");
+    auto c_tensor = zipped_divide(t_tensor_C, c_tile);
+    print_layout_debug("c_tensor = zipped_divide(t_tensor_C, c_tile)", c_tensor);
+    auto tv_tensor = c_tensor.compose(typename decltype(mmaC)::AtomLayoutC_TV{}, _);
+    print_layout_debug("tv_tensor = c_tensor.compose(AtomLayoutC_TV, _)", tv_tensor);
+    auto thr_tile = make_tile(_,
+                              make_tile(make_layout(size<1>(mmaC.get_thr_layout_vmnk())),
+                                        make_layout(size<2>(mmaC.get_thr_layout_vmnk()))));
+    printf("thr_tile (ThrM,ThrN): "); print(thr_tile); printf("\n");
+    auto thr_tensor = zipped_divide(tv_tensor, thr_tile);
+    print_layout_debug("thr_tensor = zipped_divide(tv_tensor, thr_tile)", thr_tensor);
+    printf("\n");
+  }
+
+  printf("==== [sgemm_sm80.cu] end-to-end tensor views (thread0) ====\n");
+  {
+    TA const* A_ptr = nullptr;
+    TB const* B_ptr = nullptr;
+    TC* C_ptr = nullptr;
+
+    Tensor mA = make_tensor(make_gmem_ptr(A_ptr), select<0,2>(prob_shape), dA); // (M,K)
+    Tensor mB = make_tensor(make_gmem_ptr(B_ptr), select<1,2>(prob_shape), dB); // (N,K)
+    Tensor mC = make_tensor(make_gmem_ptr(C_ptr), select<0,1>(prob_shape), dC); // (M,N)
+
+    auto cta_coord = make_coord(0, 0, _);  // (m,n,k)
+    Tensor gA = local_tile(mA, cta_tiler, cta_coord, Step<_1, X,_1>{});  // (BLK_M,BLK_K,k)
+    Tensor gB = local_tile(mB, cta_tiler, cta_coord, Step< X,_1,_1>{});  // (BLK_N,BLK_K,k)
+    Tensor gC = local_tile(mC, cta_tiler, cta_coord, Step<_1,_1, X>{});  // (BLK_M,BLK_N)
+
+    Tensor sA = make_tensor(make_smem_ptr((TA*)nullptr), sA_layout);      // (BLK_M,BLK_K,PIPE)
+    Tensor sB = make_tensor(make_smem_ptr((TB*)nullptr), sB_layout);      // (BLK_N,BLK_K,PIPE)
+
+    printf("mA: "); print(mA.layout()); printf("\n");
+    printf("gA: "); print(gA.layout()); printf("\n");
+    printf("sA: "); print(sA.layout()); printf("\n");
+    printf("mB: "); print(mB.layout()); printf("\n");
+    printf("gB: "); print(gB.layout()); printf("\n");
+    printf("sB: "); print(sB.layout()); printf("\n");
+    printf("mC: "); print(mC.layout()); printf("\n");
+    printf("gC: "); print(gC.layout()); printf("\n\n");
+
+    auto thr_copy_a = copyA.get_slice(0);
+    auto thr_copy_b = copyB.get_slice(0);
+    Tensor tAgA = thr_copy_a.partition_S(gA);
+    Tensor tAsA = thr_copy_a.partition_D(sA);
+    Tensor tBgB = thr_copy_b.partition_S(gB);
+    Tensor tBsB = thr_copy_b.partition_D(sB);
+
+    printf("tAgA: "); print(tAgA.layout()); printf("\n");
+    printf("tAsA: "); print(tAsA.layout()); printf("\n");
+    printf("tBgB: "); print(tBgB.layout()); printf("\n");
+    printf("tBsB: "); print(tBsB.layout()); printf("\n\n");
+
+    auto thr_mma = mmaC.get_slice(0);
+    Tensor tCgC = thr_mma.partition_C(gC);
+    Tensor tCrA = thr_mma.partition_fragment_A(sA(_,_,0));
+    Tensor tCrB = thr_mma.partition_fragment_B(sB(_,_,0));
+    Tensor tCrC = thr_mma.make_fragment_C(tCgC);
+
+    printf("tCgC: "); print(tCgC.layout()); printf("\n");
+    printf("tCrA: "); print(tCrA.layout()); printf("\n");
+    printf("tCrB: "); print(tCrB.layout()); printf("\n");
+    printf("tCrC: "); print(tCrC.layout()); printf("\n\n");
+
+    auto s2r_thr_copy_a = s2r_copy_a.get_slice(0);
+    auto s2r_thr_copy_b = s2r_copy_b.get_slice(0);
+    Tensor tXsA = s2r_thr_copy_a.partition_S(sA);
+    Tensor tXsB = s2r_thr_copy_b.partition_S(sB);
+    Tensor tXrA = s2r_thr_copy_a.retile_D(tCrA);
+    Tensor tXrB = s2r_thr_copy_b.retile_D(tCrB);
+
+    printf("tXsA: "); print(tXsA.layout()); printf("\n");
+    printf("tXrA: "); print(tXrA.layout()); printf("\n");
+    printf("tXsB: "); print(tXsB.layout()); printf("\n");
+    printf("tXrB: "); print(tXrB.layout()); printf("\n\n");
+  }
+
+#if !defined(_WIN32)
+  if (opts.dump_latex) {
+    (void)std::filesystem::create_directories(opts.outdir);
+    std::string base = opts.outdir;
+    if (!base.empty() && base.back() != '/') {
+      base += "/";
+    }
+
+    printf("==== LaTeX dumps (written to %s) ====\n", opts.outdir.c_str());
+
+    // 2D layouts
+    dump_latex_to_file(base + "swizzle_base.tex", [&] { print_latex(swizzle_base); });
+    dump_latex_to_file(base + "swizzle_atom.tex", [&] { print_latex(swizzle_atom); });
+
+    // Smem pipe0 slices
+    {
+      Tensor sA = make_tensor(make_smem_ptr((TA*)nullptr), sA_layout);
+      Tensor sB = make_tensor(make_smem_ptr((TB*)nullptr), sB_layout);
+      dump_latex_to_file(base + "sA_pipe0.tex", [&] { print_latex(sA(_,_,0).layout()); });
+      dump_latex_to_file(base + "sB_pipe0.tex", [&] { print_latex(sB(_,_,0).layout()); });
+    }
+    dump_latex_to_file(base + "sC_layout.tex", [&] { print_latex(sC_layout); });
+
+    // Copy and MMA figures
+    dump_latex_to_file(base + "copyA.tex", [&] { print_latex(copyA); });
+    dump_latex_to_file(base + "copyB.tex", [&] { print_latex(copyB); });
+    dump_latex_to_file(base + "mmaC.tex",  [&] { print_latex(mmaC); });
+
+    // TV visualizations (extra helpful)
+    dump_latex_to_file(base + "mma_layoutA_TV.tex", [&] {
+      auto tile_mk = make_shape(tile_size<0>(mmaC), tile_size<2>(mmaC));
+      auto refA = make_identity_tensor(tile_mk);
+      auto tensorA_TV = composition(refA, mmaC.get_layoutA_TV());
+      print_latex_tv(tensorA_TV, tile_mk);
+    });
+    dump_latex_to_file(base + "mma_layoutB_TV.tex", [&] {
+      auto tile_nk = make_shape(tile_size<1>(mmaC), tile_size<2>(mmaC));
+      auto refB = make_identity_tensor(tile_nk);
+      auto tensorB_TV = composition(refB, mmaC.get_layoutB_TV());
+      print_latex_tv(tensorB_TV, tile_nk);
+    });
+    dump_latex_to_file(base + "mma_layoutC_TV.tex", [&] {
+      auto tile_mn = make_shape(tile_size<0>(mmaC), tile_size<1>(mmaC));
+      auto refC = make_identity_tensor(tile_mn);
+      auto tensorC_TV = composition(refC, mmaC.get_layoutC_TV());
+      print_latex_tv(tensorC_TV, tile_mn);
+    });
+
+    dump_latex_to_file(base + "copyA_layoutS_TV.tex", [&] {
+      auto tiler_mn = typename decltype(copyA)::Tiler_MN{};
+      auto tile_mn = product_each(shape(logical_divide(make_layout(Shape<_1,_1>{}), tiler_mn)));
+      auto refS = make_identity_tensor(tile_mn);
+      auto layoutS_TV = copyA.tidfrg_S(refS)(_,_,Int<0>{});
+      print_latex_tv(layoutS_TV, tile_mn);
+    });
+    dump_latex_to_file(base + "copyA_layoutD_TV.tex", [&] {
+      auto tiler_mn = typename decltype(copyA)::Tiler_MN{};
+      auto tile_mn = product_each(shape(logical_divide(make_layout(Shape<_1,_1>{}), tiler_mn)));
+      auto refD = make_identity_tensor(tile_mn);
+      auto layoutD_TV = copyA.tidfrg_D(refD)(_,_,Int<0>{});
+      print_latex_tv(layoutD_TV, tile_mn);
+    });
+
+    // S2R aligned copies
+    dump_latex_to_file(base + "s2r_copy_a.tex", [&] { print_latex(s2r_copy_a); });
+    dump_latex_to_file(base + "s2r_copy_b.tex", [&] { print_latex(s2r_copy_b); });
+  }
+#endif
+
+  printf("==== dump done ====\n");
 }
 }  // namespace
 
@@ -375,12 +813,15 @@ gemm_tn(int m, int n, int k,
 
   // Define the smem layouts (static)
   // Swizzles for LDSM and 128b k-major loads
-  print_layout(Layout<Shape <_8,Shape <_8, _8>>,
-                                         Stride<_8,Stride<_1,_64>>>{});
-  auto swizzle_atom = composition(Swizzle<3,3,3>{},
-                                  Layout<Shape <_8,Shape <_8, _8>>,
-                                         Stride<_8,Stride<_1,_64>>>{});
-  print_layout(swizzle_atom);
+  using SwizzleBase =
+      Layout<Shape<_8, Shape<_8, _8>>,
+             Stride<_8, Stride<_1, _64>>>;
+  auto swizzle_base = SwizzleBase{};
+  auto swizzle_atom = composition(Swizzle<3,3,3>{}, swizzle_base);
+  if constexpr (kPrintLayouts) {
+    print_layout_debug("swizzle_base", swizzle_base);
+    print_layout_debug("swizzle_atom", swizzle_atom);
+  }
   auto sA = tile_to_shape(swizzle_atom, make_shape(bM,bK,bP));
   auto sB = tile_to_shape(swizzle_atom, make_shape(bN,bK,bP));
   auto sC = make_layout(make_shape(bM, bN));
@@ -670,6 +1111,12 @@ gemm(char transA, char transB, int m, int n, int k,
 
 int main(int argc, char** argv)
 {
+  DumpOptions dump_opts;
+  if (parse_dump_options(argc, argv, &dump_opts)) {
+    dump_sgemm_sm80_layouts(dump_opts);
+    return 0;
+  }
+
   cudaDeviceProp props;
   cudaError_t error = cudaGetDeviceProperties(&props, 0);
   if (error != cudaSuccess) {
