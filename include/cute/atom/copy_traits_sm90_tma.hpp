@@ -681,6 +681,11 @@ coalesce_256_impl(OldShape const& old_shape, OldStride const& old_stride,
 {
   if constexpr (I == rank_v<OldShape>) {
     // Base case, we're done
+#if CUTE_DEBUG_TMA_GBASIS
+    print("    [coalesce_256_impl] I="); print(Int<I>{});
+    print(" base-case reached, new_shape="); print(new_shape);
+    print(" new_stride="); print(new_stride); print("\n");
+#endif
     if constexpr (is_constant<1, NewShape>::value) {
       return Layout<_1,_0>{};
     } else {
@@ -688,18 +693,39 @@ coalesce_256_impl(OldShape const& old_shape, OldStride const& old_stride,
     }
   } else if constexpr (is_constant<1, decltype(get<I>(old_shape))>::value) {
     // shape<I>(layout) == _1, skip it and continue
+#if CUTE_DEBUG_TMA_GBASIS
+    print("    [coalesce_256_impl] I="); print(Int<I>{});
+    print(" skip old mode because shape==1, old_shape[I]="); print(get<I>(old_shape));
+    print(" old_stride[I]="); print(get<I>(old_stride)); print("\n");
+#endif
     return coalesce_256_impl<I+1>(old_shape, old_stride, new_shape, new_stride);
   } else if constexpr (is_constant<1, NewShape>::value) {
     // Replace our shape-1 with anything (Can only happen on input new_shape/new_stride)
+#if CUTE_DEBUG_TMA_GBASIS
+    print("    [coalesce_256_impl] I="); print(Int<I>{});
+    print(" replace seed shape-1 with old mode, old_shape[I]="); print(get<I>(old_shape));
+    print(" old_stride[I]="); print(get<I>(old_stride)); print("\n");
+#endif
     return coalesce_256_impl<I+1>(old_shape, old_stride, get<I>(old_shape), get<I>(old_stride));
   } else if constexpr (is_constant<true, decltype(back(new_shape) * back(new_stride) == get<I>(old_stride) &&
                                                   get<I>(old_shape) * back(new_shape) <= Int<256>{})>::value) {
     // Merge modes because the shapes and strides match and the merge is 256 or less
+#if CUTE_DEBUG_TMA_GBASIS
+    print("    [coalesce_256_impl] I="); print(Int<I>{});
+    print(" merge mode, back(shape/stride)=("); print(back(new_shape)); print(",");
+    print(back(new_stride)); print(") old(shape/stride)=("); print(get<I>(old_shape));
+    print(","); print(get<I>(old_stride)); print(")\n");
+#endif
     return coalesce_256_impl<I+1>(old_shape, old_stride,
                                   replace_back(new_shape, get<I>(old_shape) * back(new_shape)),
                                   new_stride);
   } else {
     // Can't replace or merge, so append a new mode
+#if CUTE_DEBUG_TMA_GBASIS
+    print("    [coalesce_256_impl] I="); print(Int<I>{});
+    print(" append new mode, old(shape/stride)=("); print(get<I>(old_shape));
+    print(","); print(get<I>(old_stride)); print(")\n");
+#endif
     return coalesce_256_impl<I+1>(old_shape, old_stride,
                                   append(new_shape,  get<I>(old_shape)),
                                   append(new_stride, get<I>(old_stride)));
@@ -717,6 +743,11 @@ coalesce_256(Layout<Shape,Stride> const& layout)
 {
   auto flat_shape  = flatten(layout.shape());
   auto flat_stride = flatten(layout.stride());
+#if CUTE_DEBUG_TMA_GBASIS
+  print("  [coalesce_256] input layout : "); print(layout); print("\n");
+  print("  [coalesce_256] flat_shape   : "); print(flat_shape); print("\n");
+  print("  [coalesce_256] flat_stride  : "); print(flat_stride); print("\n");
+#endif
   return coalesce_256_impl<1>(flat_shape, flat_stride, get<0>(flat_shape), get<0>(flat_stride));
 }
 
@@ -955,10 +986,31 @@ fill_tma_gmem_shape_stride(Tensor<GEngine,GLayout>   const& gtensor,           /
   auto gmem_shape  =  shape(gtensor);
   auto gmem_stride = stride(gtensor);
 
+#if CUTE_DEBUG_TMA_GBASIS
+  auto print_arr_local = [](char const* name, auto const& arr) {
+    print("  "); print(name); print(" : [");
+    for (int ii = 0; ii < int(TmaRank); ++ii) {
+      print(arr[ii]);
+      if (ii + 1 < int(TmaRank)) { print(", "); }
+    }
+    print("]\n");
+  };
+  print("\n[fill_tma_gmem_shape_stride] begin\n");
+  print("  gtensor (src: input gtensor) : "); print(gtensor); print("\n");
+  print("  tma_gbasis_stride (src: input mapping) : "); print(tma_gbasis_stride); print("\n");
+  print_arr_local("gmem_prob_shape init", gmem_prob_shape);
+  print_arr_local("gmem_prob_stride init", gmem_prob_stride);
+#endif
+
   // 遍历每个 TMA 维度，使用 tma_gbasis_stride 中的间接索引来构建 TMA 的 shape/stride
   // Use the indirections in tma_gbasis_stride into gtensor to construct the tma gmem shapes/strides
   for_each(make_seq<tma_rank>{}, [&](auto i) {
     constexpr int tma_i_rank = decltype(rank<i>(tma_gbasis_stride))::value;
+
+#if CUTE_DEBUG_TMA_GBASIS
+    print("  [fill_tma_gmem_shape_stride] tma_dim i="); print(i);
+    print(" rank<i>(mapping)="); print(Int<tma_i_rank>{}); print("\n");
+#endif
 
     if constexpr (tma_i_rank == 1) {
       // ========== Case 1: 简单映射 ==========
@@ -968,6 +1020,11 @@ fill_tma_gmem_shape_stride(Tensor<GEngine,GLayout>   const& gtensor,           /
       auto ej = unwrap(get<i>(tma_gbasis_stride));
       gmem_prob_shape[i]  = basis_get(ej, gmem_shape);   // 直接取 GMEM 第 j 维的 size
       gmem_prob_stride[i] = basis_get(ej, gmem_stride);  // 直接取 GMEM 第 j 维的 stride
+#if CUTE_DEBUG_TMA_GBASIS
+      print("    case-1 ej : "); print(ej); print("\n");
+      print("    case-1 shape/stride -> ("); print(gmem_prob_shape[i]); print(", ");
+      print(gmem_prob_stride[i]); print(")\n");
+#endif
     } else {
       // ========== Case 2: 复合映射（多个 GMEM 维度合并到一个 TMA 维度）==========
       // 例如：tma_gbasis_stride[i] = (E<j1>, E<j2>, ...)
@@ -983,12 +1040,16 @@ fill_tma_gmem_shape_stride(Tensor<GEngine,GLayout>   const& gtensor,           /
       //       合并：stride=gcd(1,4)=1, shape = 3+(4-1)*(1/1)+(3-1)*(4/1)+1 = 12
       //             覆盖 [0..11]
       // Apply a recurrence to each gmem mode that contributes to this tma mode
+#if CUTE_DEBUG_TMA_GBASIS
+      print("    case-2 mapping tuple : "); print(get<i>(tma_gbasis_stride)); print("\n");
+#endif
       for_each(get<i>(tma_gbasis_stride), [&](auto ej) {
         // Problem shape
         uint64_t shape_j  = basis_get(ej, gmem_shape);
         // Problem stride (in bytes)
         uint64_t stride_j = basis_get(ej, gmem_stride);
         uint64_t old_stride = gmem_prob_stride[i];
+        auto old_shape = gmem_prob_shape[i];
 
         // 新 stride = gcd(原 stride, 当前维度的 stride)
         gmem_prob_stride[i] = gcd(gmem_prob_stride[i], stride_j);
@@ -1007,9 +1068,26 @@ fill_tma_gmem_shape_stride(Tensor<GEngine,GLayout>   const& gtensor,           /
           // stride 为 0 的特殊情况（broadcast）
           gmem_prob_shape[i] = shape_j;
         }
+
+#if CUTE_DEBUG_TMA_GBASIS
+        print("      ej : "); print(ej);
+        print(" shape_j="); print(shape_j);
+        print(" stride_j="); print(stride_j);
+        print(" old(shape,stride)=("); print(old_shape); print(","); print(old_stride); print(")");
+        print(" new(shape,stride)=("); print(gmem_prob_shape[i]); print(","); print(gmem_prob_stride[i]); print(")\n");
+#endif
       });
     }
+
+#if CUTE_DEBUG_TMA_GBASIS
+    print_arr_local("gmem_prob_shape running", gmem_prob_shape);
+    print_arr_local("gmem_prob_stride running", gmem_prob_stride);
+#endif
   });
+
+#if CUTE_DEBUG_TMA_GBASIS
+  print("[fill_tma_gmem_shape_stride] end\n");
+#endif
 }
 
 // Overload for an existing Copy_Traits
@@ -1385,9 +1463,18 @@ make_tma_copy_desc(Tensor<GEngine,GLayout> const& gtensor,         // The origin
     auto si = basis_get(ei,  shape(gmem_layout));
     auto di = basis_get(ei, stride(gmem_layout));
 
+#if CUTE_DEBUG_TMA_GBASIS
+    print("    [transform_leaf] ei="); print(ei);
+    print(" si="); print(si);
+    print(" di="); print(di); print("\n");
+#endif
+
     // Case 1: 如果这个维度的 size=1 或 stride=0，它对 TMA 没有贡献
     // 返回 Int<0>{} 作为算术恒等元（加法单位元）
     if constexpr (is_constant<1, decltype(si)>::value || is_constant<0, decltype(di)>::value) {
+#if CUTE_DEBUG_TMA_GBASIS
+      print("      -> case-1 size==1 or stride==0, return Int<0>\n");
+#endif
       return Int<0>{};                  // If size-1 or stride-0, return arithmetic identity -- no contribution to the TMA
     } else {
       auto tma_gmem_basis_stride = stride(tma_gbasis);
@@ -1399,31 +1486,58 @@ make_tma_copy_desc(Tensor<GEngine,GLayout> const& gtensor,         // The origin
       using EI = decltype(ei);
       [[maybe_unused]] auto j = find_if(tma_gmem_basis_stride, [&](auto tma_stride_j) { return any_of(tma_stride_j, [&](auto dj) { return dj == EI{}; }); });
 
+#if CUTE_DEBUG_TMA_GBASIS
+      print("      candidate j (src: find_if over stride(tma_gbasis)) : "); print(j); print("\n");
+#endif
+
       // Case 2: 如果找不到（这个 GMEM 维度不在任何 TMA 维度中）
       // 例如：batch 维度可能不参与 TMA
       if constexpr (decltype(j == rank(tma_gmem_basis_stride))::value) {
+#if CUTE_DEBUG_TMA_GBASIS
+        print("      -> case-2 not found in tma_gbasis, return Int<0>\n");
+#endif
         return Int<0>{};               // If not-found, return arithmetic identity -- no contribution to the TMA
       } else
       // Case 3: 如果在 TMA dim0 中找到（连续维度）
       // 需要考虑 recast 比例（如 half2 → half 时，坐标需要乘 2）
       if constexpr (decltype(j == Int<0>{})::value) {
         auto scale = recast_ratio * basis_get(ei, stride(gtensor));
+#if CUTE_DEBUG_TMA_GBASIS
+        print("      -> case-3 j==0, scale="); print(scale);
+        print(" return="); print(E<j>{} * scale); print("\n");
+#endif
         return E<j>{} * scale;         // Return TMA Coord basis -- with a recast scale factor
       } else
       // Case 4: 如果 TMA 维度 j 只对应一个 GMEM 维度
       // scale 已知为 1
       if constexpr (decltype(rank<j>(tma_gmem_basis_stride) == Int<1>{})::value) {
+#if CUTE_DEBUG_TMA_GBASIS
+        print("      -> case-4 single-mode rank<j>==1, return="); print(E<j>{}); print("\n");
+#endif
         return E<j>{};                 // Return TMA Coord basis -- known scale of Int<1>{}
       } else {
         // Case 5: TMA 维度 j 对应多个 GMEM 维度（合并情况）
         // 需要动态计算 scale
         int32_t scale = ceil_div(int32_t(di * sizeof_bits_v<TmaInternalType> / cute::max(gmem_prob_stride[j], uint64_t{16})), 8);
+#if CUTE_DEBUG_TMA_GBASIS
+        print("      -> case-5 merged mode, dynamic scale="); print(scale);
+        print(" return="); print(E<j>{} * scale); print("\n");
+#endif
         return E<j>{} * scale;         // Return TMA Coord basis -- with a dynamic scale factor
       }
     }
   });
 
 #if CUTE_DEBUG_TMA_GBASIS
+  {
+    auto const* tma_desc_words = reinterpret_cast<uint32_t const*>(&tma_desc);
+    print("  tma_desc_words[0..7] (src: reinterpret_cast<uint32_t const*>(&tma_desc)) : [");
+    for (int wi = 0; wi < 8; ++wi) {
+      print(tma_desc_words[wi]);
+      if (wi != 7) { print(", "); }
+    }
+    print("]\n");
+  }
   print("  gmem_tma_basis_stride (src: transform_leaf(gbasis, ...)) : "); print(gmem_tma_basis_stride); print("\n");
   print("[make_tma_copy_desc] end\n");
 #endif
@@ -1556,13 +1670,16 @@ make_tma_copy_tiled(CopyOp                  const& copy_op,
   // Combine with the T mapping
   [[maybe_unused]] auto layout_TV = make_layout(layout_T, layout_V);
 
-#if 0
-  print("cta_tiler : "); print(cta_tiler); print("\n");
-  print("layout_v : "); print(layout_v); print("\n");
-  print("layout_V : "); print(layout_V); print("\n");
-  print("layout_t : "); print(layout_t); print("\n");
-  print("layout_T : "); print(layout_T); print("\n");
-  print("layout_TV : "); print(layout_TV); print("\n");
+#if CUTE_DEBUG_TMA_GBASIS
+  print("\n[make_tma_copy_tiled] summary\n");
+  print("  cta_tiler (src: product_each(shape(cta_v_map))) : "); print(cta_tiler); print("\n");
+  print("  num_elems_per_tma (src: RefLayout bits / sizeof_bits<value_type>) : "); print(num_elems_per_tma); print("\n");
+  print("  inv_smem_layout (src: right_inverse(get_nonswizzle_portion(slayout))) : "); print(inv_smem_layout); print("\n");
+  print("  layout_v (src: composition(inv_smem_layout, num_elems_per_tma)) : "); print(layout_v); print("\n");
+  print("  layout_V (src: tile_to_shape(make_layout(layout_v), size(cta_v_map))) : "); print(layout_V); print("\n");
+  print("  layout_t (src: make_layout(cosize(cta_t_map), safe_div(...))) : "); print(layout_t); print("\n");
+  print("  layout_T (src: composition(inv_smem_layout, composition(layout_t, cta_t_map))) : "); print(layout_T); print("\n");
+  print("  layout_TV (src: make_layout(layout_T, layout_V)) : "); print(layout_TV); print("\n");
 #endif
 
   return TiledCopy<decltype(atom), decltype(layout_TV), decltype(cta_tiler)>{atom};
@@ -1668,6 +1785,16 @@ make_tma_copy(CopyOp                  const& copy_op,
     auto cta_t_tile = make_layout(cluster_size);
     // Prefer TmaInternalType if specified. Fallback to GEngine::value_type
     using TmaType = conditional_t<is_same<void, TmaInternalType>::value, typename GEngine::value_type, TmaInternalType>;
+#if CUTE_DEBUG_TMA_GBASIS
+    print("\n[make_tma_copy] begin\n");
+    print("  gtensor (src: input gtensor) : "); print(gtensor); print("\n");
+    print("  slayout (src: input slayout) : "); print(slayout); print("\n");
+    print("  cta_tiler (src: input cta_tiler) : "); print(cta_tiler); print("\n");
+    print("  cluster_size (src: input cluster_size) : "); print(cluster_size); print("\n");
+    print("  cta_v_tile (src: make_identity_layout(shape(gtensor)).compose(cta_tiler)) : "); print(cta_v_tile); print("\n");
+    print("  cta_t_tile (src: make_layout(cluster_size)) : "); print(cta_t_tile); print("\n");
+    print("  TmaType.bits (src: sizeof_bits<TmaType>::value) : "); print(sizeof_bits<TmaType>::value); print("\n");
+#endif
     return detail::make_tma_copy_tiled<TmaType>(copy_op,
                                                 gtensor, slayout,
                                                 cta_t_tile, cta_v_tile);
