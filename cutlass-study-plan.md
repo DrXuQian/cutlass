@@ -1,0 +1,264 @@
+- CUTLASS 六天学习计划 #cutlass #study #cuda
+  - ## Day 1: CuTe 基础 (Layout + Atom)
+    SCHEDULED: <2024-12-29 Sun>
+    - ### 上午：Layout 核心操作
+      - TODO 09:00-09:30 coalesce 原理：合并连续维度
+        - 文件：`include/cute/layout.hpp`
+        - 理解：何时触发合并，stride 连续性判断
+      - TODO 09:30-10:00 coalesce 实现：递归合并算法
+        - 跟踪 `coalesce()` 函数实现
+      - TODO 10:00-10:30 flatten 原理：展平嵌套 tuple
+        - Shape<Shape<_2,_4>, _8> → Shape<_2,_4,_8>
+      - TODO 10:30-11:00 composition 原理：Layout 复合
+        - `make_layout(layoutA, layoutB)` 的语义
+      - TODO 11:00-11:30 logical_divide：逻辑分割
+        - 文件：`include/cute/layout.hpp`
+        - `logical_divide(layout, tile)` 返回结构
+      - TODO 11:30-12:00 zipped_divide：打包分割结果
+        - 与 logical_divide 的区别
+    - ### 下午：Swizzle + Tensor
+      - TODO 14:00-14:30 Swizzle<B,M,S> 参数含义
+        - B = bits, M = base, S = shift
+        - 文件：`include/cute/swizzle.hpp`
+      - TODO 14:30-15:00 Swizzle 与 bank conflict
+        - 32 banks × 4 bytes = 128 bytes
+        - 如何通过 swizzle 避免冲突
+      - TODO 15:00-15:30 ComposedLayout 结构
+        - `Layout<Shape, Stride>` vs `ComposedLayout<Swizzle, Offset, Layout>`
+      - TODO 15:30-16:00 make_tensor 构建 Tensor
+        - `make_tensor(ptr, layout)` vs `make_tensor(ptr, shape, stride)`
+      - TODO 16:00-16:30 partition 操作
+        - `partition_S`, `partition_D` 语义
+      - TODO 16:30-17:00 local_tile 与 get_slice
+        - Tile 级别的数据访问
+    - ### 晚上：Atom 结构
+      - TODO 19:00-19:30 MMA Atom：ThrID 布局
+        - 32 线程如何映射到 MMA 操作
+      - TODO 19:30-20:00 MMA Atom：ValLayoutMNK
+        - 每个线程处理的数据量
+      - TODO 20:00-20:30 MMA Atom：LayoutC_TV, LayoutA_TV, LayoutB_TV
+        - Thread-Value 布局的含义
+      - TODO 20:30-21:00 Copy Atom：SrcLayout, DstLayout, RefLayout
+        - 拷贝操作的源/目标布局
+  -
+  - ## Day 2: CuTe 高级 (Tiled + TMA)
+    SCHEDULED: <2024-12-30 Mon>
+    - ### 上午：TiledMMA
+      - TODO 09:00-09:30 make_tiled_mma 构建流程
+        - 参数：MMA_Atom, AtomLayoutMNK, Permutation
+      - TODO 09:30-10:00 AtomLayoutMNK 参数详解
+        - 如何在 M/N/K 维度复制 Atom
+      - TODO 10:00-10:30 Permutation 参数
+        - 线程排列顺序
+      - TODO 10:30-11:00 thrfrg_C/A/B 函数
+        - Thread-Fragment 分解
+      - TODO 11:00-11:30 partition_fragment_C/A/B
+        - 获取每个线程的 fragment
+      - TODO 11:30-12:00 get_slice 与 retile
+        - 从 TiledMMA 获取单线程视图
+    - ### 下午：TiledCopy + TMA 基础
+      - TODO 14:00-14:30 make_tiled_copy 构建
+        - Copy_Atom + LayoutCopy_TV + ShapeTiler
+      - TODO 14:30-15:00 LayoutCopy_TV 参数
+        - 线程到值的映射
+      - TODO 15:00-15:30 ShapeTiler 参数
+        - Tile 形状定义
+      - TODO 15:30-16:00 TMA 概述：Tensor Memory Accelerator
+        - SM90 专用硬件单元
+      - TODO 16:00-16:30 make_tma_copy 函数
+        - 创建 TMA Copy 操作
+      - TODO 16:30-17:00 CuTensorMap 结构
+        - TMA Descriptor 内容
+    - ### 晚上：TMA 高级
+      - TODO 19:00-19:30 fill_tma_gmem_shape_stride 函数
+        - 填充 TMA 的 GMEM 形状/步长
+        - 文件：`include/cute/atom/copy_traits_sm90_tma.hpp:847-945`
+      - TODO 19:30-20:00 make_tma_copy_desc 函数
+        - 创建 TMA Descriptor
+        - 文件：`include/cute/atom/copy_traits_sm90_tma.hpp:962-1307`
+      - TODO 20:00-20:30 SM90_TMA_LOAD / SM90_TMA_STORE
+        - TMA 拷贝操作类型
+      - TODO 20:30-21:00 Descriptor Fence 机制
+        - `tma_descriptor_cp_fence_release`, `tma_descriptor_fence_acquire`
+        - 文件：`include/cute/arch/copy_sm90_desc.hpp`
+  -
+  - ## Day 3: Epilogue 基础架构
+    SCHEDULED: <2024-12-31 Tue>
+    - ### 上午：Epilogue 整体结构
+      - TODO 09:00-09:30 DefaultEpilogue 模板参数
+        - CtaTileShapeMNK, EpilogueTile, ElementD, ElementC...
+      - TODO 09:30-10:00 CollectiveEpilogue 类结构
+        - 文件：`include/cutlass/epilogue/collective/sm90_epilogue_tma_warpspecialized.hpp`
+      - TODO 10:00-10:30 EpilogueTile 类型
+        - EpilogueTileAuto vs 显式指定
+      - TODO 10:30-11:00 Epilogue 与 Mainloop 的接口
+        - Accumulator 如何传递
+      - TODO 11:00-11:30 Epilogue SharedStorage 结构
+        - SMEM 分配与布局
+      - TODO 11:30-12:00 Epilogue Params 结构
+        - 运行时参数传递
+    - ### 下午：Epilogue SMEM 与 TMA
+      - TODO 14:00-14:30 SmemLayoutAtom 设计
+        - 基础 SMEM 布局单元
+      - TODO 14:30-15:00 SmemLayoutC / SmemLayoutD
+        - C 和 D 矩阵的 SMEM 布局
+      - TODO 15:00-15:30 GmemTiledCopyC / GmemTiledCopyD
+        - Epilogue 的 GMEM 拷贝策略
+      - TODO 15:30-16:00 TMA Store 流程
+        - SMEM → GMEM 的 TMA 存储
+      - TODO 16:00-16:30 store_tile 函数分析
+        - 存储一个 tile 的完整流程
+      - TODO 16:30-17:00 store_tail 函数分析
+        - 处理最后一个 tile
+    - ### 晚上：Epilogue Pipeline
+      - TODO 19:00-19:30 epi_load_pipe 概述
+        - Epilogue 的加载管线
+      - TODO 19:30-20:00 epi_store_pipe 概述
+        - Epilogue 的存储管线
+      - TODO 20:00-20:30 Producer/Consumer 在 Epilogue
+        - 与 Mainloop 的协调
+      - TODO 20:30-21:00 Epilogue 双缓冲机制
+        - 流水线深度与 SMEM 使用
+  -
+  - ## Day 4: EVT Fusion 机制
+    SCHEDULED: <2025-01-01 Wed>
+    - ### 上午：EVT 基础概念
+      - TODO 09:00-09:30 Epilogue Visitor Tree 概念
+        - 什么是 EVT，为什么需要
+      - TODO 09:30-10:00 Sm90TreeVisitor 结构
+        - 文件：`include/cutlass/epilogue/fusion/sm90_visitor_tma_warpspecialized.hpp`
+      - TODO 10:00-10:30 节点类型：Compute, Load, Store
+        - EVT 的三类节点
+      - TODO 10:30-11:00 EVT 的类型推导机制
+        - 编译期类型计算
+      - TODO 11:00-11:30 FusionCallbacks 结构
+        - 文件：`include/cutlass/epilogue/fusion/fusion_callbacks.hpp`
+      - TODO 11:30-12:00 LinearCombination 详解
+        - α×Acc + β×C 的实现
+    - ### 下午：内置 Fusion Ops
+      - TODO 14:00-14:30 ScaledLinComb 操作
+        - 带缩放的线性组合
+      - TODO 14:30-15:00 BiasAdd 操作
+        - 偏置加法的实现
+      - TODO 15:00-15:30 Activation 操作
+        - ReLU, GeLU 等激活函数
+      - TODO 15:30-16:00 ScalarBroadcast 操作
+        - 标量广播
+      - TODO 16:00-16:30 Sm90AuxLoad 操作
+        - 辅助输入加载
+        - 文件：`include/cutlass/epilogue/fusion/sm90_visitor_load_tma_warpspecialized.hpp`
+      - TODO 16:30-17:00 Sm90SrcFetch / Sm90AccFetch
+        - 源数据和累加器获取
+    - ### 晚上：Store Ops 与自定义
+      - TODO 19:00-19:30 Sm90AuxStore 操作
+        - 辅助输出存储
+        - 文件：`include/cutlass/epilogue/fusion/sm90_visitor_store_tma_warpspecialized.hpp`
+      - TODO 19:30-20:00 Sm90ScalarReduce 操作
+        - 标量归约
+      - TODO 20:00-20:30 EVT 节点组合示例
+        - 多个操作串联
+      - TODO 20:30-21:00 自定义 EVT Fusion 实现
+        - 如何添加新的 fusion 操作
+  -
+  - ## Day 5: CollectiveMMA + Pipeline
+    SCHEDULED: <2025-01-02 Thu>
+    - ### 上午：CollectiveMMA 架构
+      - TODO 09:00-09:30 Warp Specialization 概念
+        - Producer warp vs Consumer warp
+      - TODO 09:30-10:00 Producer/Consumer 分工
+        - 谁负责 TMA，谁负责 MMA
+      - TODO 10:00-10:30 CollectiveMma 类结构
+        - 文件：`include/cutlass/gemm/collective/sm90_mma_tma_gmma_ss_warpspecialized.hpp`
+      - TODO 10:30-11:00 load() 函数分析
+        - Producer 的 TMA 加载流程
+      - TODO 11:00-11:30 mma() 函数分析
+        - Consumer 的 MMA 执行流程
+      - TODO 11:30-12:00 SharedStorage 结构
+        - Mainloop 的 SMEM 分配
+    - ### 下午：数据流与 GMMA
+      - TODO 14:00-14:30 GMEM → SMEM：TMA Load
+        - cp.async.bulk.tensor 指令
+      - TODO 14:30-15:00 prefetch 与 tma_load_mbar
+        - 预取策略与 mbarrier
+      - TODO 15:00-15:30 SMEM → RF：warpgroup_arrive
+        - 数据从 SMEM 到寄存器
+      - TODO 15:30-16:00 warpgroup_wait 同步
+        - 等待 MMA 完成
+      - TODO 16:00-16:30 GMMA 执行：wgmma.mma_async
+        - Warpgroup 级别的矩阵乘法
+      - TODO 16:30-17:00 warpgroup_fence 机制
+        - 内存栅栏
+    - ### 晚上：Pipeline 机制
+      - TODO 19:00-19:30 PipelineTmaAsync 结构
+        - 文件：`include/cutlass/pipeline/pipeline.hpp`
+      - TODO 19:30-20:00 mbarrier 原理
+        - Hopper 的异步栅栏
+      - TODO 20:00-20:30 producer_acquire / producer_commit
+        - 生产者端的 pipeline 操作
+      - TODO 20:30-21:00 consumer_wait / consumer_release
+        - 消费者端的 pipeline 操作
+      - TODO 21:00-21:30 K-Loop mainloop_body
+        - 主循环体分析
+      - TODO 21:30-22:00 双缓冲与流水线深度
+        - SMEM stages 与性能
+  -
+  - ## Day 6: TileScheduler + Kernel 集成
+    SCHEDULED: <2025-01-03 Fri>
+    - ### 上午：TileScheduler 基础
+      - TODO 09:00-09:30 PersistentScheduler 原理
+        - Persistent kernel 概念
+      - TODO 09:30-10:00 get_current_work 函数
+        - 获取当前 tile 工作
+      - TODO 10:00-10:30 advance_to_next_work 函数
+        - 前进到下一个 tile
+      - TODO 10:30-11:00 TileScheduler 模板参数
+        - 文件：`include/cutlass/gemm/kernel/sm90_tile_scheduler.hpp`
+      - TODO 11:00-11:30 Swizzle 调度策略
+        - 提升 L2 cache 命中率
+      - TODO 11:30-12:00 RasterOrder 调度顺序
+        - 行优先 vs 列优先
+    - ### 下午：StreamK + Kernel
+      - TODO 14:00-14:30 StreamK 概念
+        - 动态负载均衡
+      - TODO 14:30-15:00 StreamKScheduler 实现
+        - 文件：`include/cutlass/gemm/kernel/sm90_tile_scheduler_stream_k.hpp`
+      - TODO 15:00-15:30 StreamK reduction 机制
+        - 部分结果归约
+      - TODO 15:30-16:00 GemmUniversal 类结构
+        - 文件：`include/cutlass/gemm/kernel/sm90_gemm_tma_warpspecialized.hpp`
+      - TODO 16:00-16:30 run() 函数分析
+        - Kernel 执行入口
+      - TODO 16:30-17:00 get_workspace_size 函数
+        - 工作空间计算
+    - ### 晚上：Example 48 完整分析
+      - TODO 19:00-19:30 Example 48 代码结构
+        - 文件：`examples/48_hopper_warp_specialized_gemm/`
+      - TODO 19:30-20:00 模板参数配置
+        - Kernel traits 设置
+      - TODO 20:00-20:30 Host 端流程
+        - 初始化、调用、验证
+      - TODO 20:30-21:00 Device 端流程
+        - Kernel 内部执行路径
+      - TODO 21:00-21:30 性能考量
+        - Tile size, stages, occupancy
+      - TODO 21:30-22:00 总结与扩展
+        - 如何修改和扩展 kernel
+  -
+  - ## 新增 Blog Topics (17篇)
+    - TODO 0x13-mma-atom-structure.md - MMA Atom 完整解析
+    - TODO 0x14-copy-atom-structure.md - Copy Atom 完整解析
+    - TODO 0x15-tiledmma-construction.md - TiledMMA 构建与 partition
+    - TODO 0x16-tiledcopy-construction.md - TiledCopy 构建流程
+    - TODO 0x17-epilogue-architecture.md - SM90 Epilogue 整体架构
+    - TODO 0x18-epilogue-smem-layout.md - Epilogue SMEM 布局与 TMA Store
+    - TODO 0x19-epilogue-pipeline.md - Epilogue Pipeline 机制
+    - TODO 0x20-evt-fusion-basics.md - EVT Fusion 机制详解
+    - TODO 0x21-evt-builtin-ops.md - EVT 内置算子解析
+    - TODO 0x22-evt-custom-fusion.md - 自定义 EVT Fusion
+    - TODO 0x23-collectivemma-architecture.md - CollectiveMMA 整体架构
+    - TODO 0x24-warp-specialization.md - Warp Specialization 详解
+    - TODO 0x25-pipeline-mbarrier.md - Pipeline 与 mbarrier 同步
+    - TODO 0x26-tile-scheduler-persistent.md - Persistent TileScheduler
+    - TODO 0x27-tile-scheduler-streamk.md - StreamK 调度详解
+    - TODO 0x28-kernel-integration.md - Kernel 完整集成
+    - TODO 0x29-example48-walkthrough.md - Example 48 端到端解析

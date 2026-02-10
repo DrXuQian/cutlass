@@ -32,6 +32,10 @@
 #include <cstdio>
 #include <cassert>
 
+// Global switch for the TMA debug path.
+// This enables both the header-side TMA tracing and the local tracing in this file.
+#define CUTE_DEBUG_TMA_GBASIS 1
+
 #include <thrust/host_vector.h>
 #include <thrust/device_vector.h>
 
@@ -48,6 +52,36 @@
 #include "cutlass/device_kernel.h"
 
 using namespace cute;
+
+#if CUTE_DEBUG_TMA_GBASIS
+// Host trace budget helper: keep logs readable when main() runs timing loops.
+CUTE_HOST
+bool
+tma_host_trace_enabled(int& budget)
+{
+  if (budget <= 0) {
+    return false;
+  }
+  --budget;
+  return true;
+}
+
+CUTE_HOST
+void
+tma_host_trace_banner(char const* fn)
+{
+  printf("\n[TMA trace][host] %s\n", fn);
+}
+
+// Device trace gate: print from a single thread in a single CTA only.
+CUTE_DEVICE
+bool
+tma_device_trace_enabled()
+{
+  return blockIdx.x == 0 && blockIdx.y == 0 && blockIdx.z == 0 &&
+         threadIdx.x == 0 && threadIdx.y == 0 && threadIdx.z == 0;
+}
+#endif
 
 template <class ElementA,
           class ElementB,
@@ -76,6 +110,10 @@ gemm_device(ProblemShape shape_MNK, CtaTiler cta_tiler,
             TC      * C, CStride dC, TiledMma mma,
             Alpha alpha, Beta beta)
 {
+  // Kernel role in call chain:
+  // main() -> gemm() -> gemm_nt/gemm_tn() -> launch gemm_device().
+  // Inside this kernel, tma_partition() derives the per-CTA TMA views.
+
   // Preconditions
   CUTE_STATIC_ASSERT_V(rank(shape_MNK) == Int<3>{});                   // (M, N, K)
   CUTE_STATIC_ASSERT_V(rank(cta_tiler) == Int<3>{});                   // (BLK_M, BLK_N, BLK_K)
@@ -89,6 +127,17 @@ gemm_device(ProblemShape shape_MNK, CtaTiler cta_tiler,
   CUTE_STATIC_ASSERT_V(size<1>(SmemLayoutB{}) == size<2>(cta_tiler));  // BLK_K
 
   CUTE_STATIC_ASSERT_V(congruent(select<0,1>(shape_MNK), dC));         // dC strides for shape MN
+
+#if CUTE_DEBUG_TMA_GBASIS
+  // Extra runtime tracing for this kernel path. Restricted to one thread by helper.
+  bool do_trace = tma_device_trace_enabled();
+  if (do_trace) {
+    print("\n[TMA trace][device] gemm_device begin\n");
+    print("  call chain: main -> gemm -> gemm_nt/gemm_tn -> gemm_device -> tma_partition\n");
+    print("  shape_MNK (src: input shape_MNK) : "); print(shape_MNK); print("\n");
+    print("  cta_tiler (src: input cta_tiler) : "); print(cta_tiler); print("\n");
+  }
+#endif
 
   //
   // Full and Tiled Tensors
@@ -106,12 +155,28 @@ gemm_device(ProblemShape shape_MNK, CtaTiler cta_tiler,
   Tensor gB = local_tile(mB, cta_tiler, cta_coord, Step< X,_1,_1>{});  // (BLK_N,BLK_K,k)
   Tensor gC = local_tile(mC, cta_tiler, cta_coord, Step<_1,_1, X>{});  // (BLK_M,BLK_N)
 
+#if CUTE_DEBUG_TMA_GBASIS
+  if (do_trace) {
+    print("  cta_coord (src: make_coord(blockIdx.x, blockIdx.y, _)) : "); print(cta_coord); print("\n");
+    print("  gA (src: local_tile(mA, cta_tiler, cta_coord, Step<_1,X,_1>{})) : "); print(gA); print("\n");
+    print("  gB (src: local_tile(mB, cta_tiler, cta_coord, Step<X,_1,_1>{})) : "); print(gB); print("\n");
+  }
+#endif
+
   // Shared memory tensors
   extern __shared__ char shared_memory[];
   using SharedStorage = SharedStorage<TA, TB, SmemLayoutA, SmemLayoutB>;
   SharedStorage& smem = *reinterpret_cast<SharedStorage*>(shared_memory);
   Tensor sA = make_tensor(make_smem_ptr(smem.A.begin()), SmemLayoutA{}); // (BLK_M,BLK_K,PIPE)
   Tensor sB = make_tensor(make_smem_ptr(smem.B.begin()), SmemLayoutB{}); // (BLK_N,BLK_K,PIPE)
+
+#if CUTE_DEBUG_TMA_GBASIS
+  if (do_trace) {
+    print("  sA (src: make_tensor(make_smem_ptr(smem.A.begin()), SmemLayoutA{})) : "); print(sA); print("\n");
+    print("  sB (src: make_tensor(make_smem_ptr(smem.B.begin()), SmemLayoutB{})) : "); print(sB); print("\n");
+    print("  calling tma_partition for A and B\n");
+  }
+#endif
 
   //
   // Partition the copying of A and B tiles
@@ -123,6 +188,8 @@ gemm_device(ProblemShape shape_MNK, CtaTiler cta_tiler,
   //   The group_modes<0,2> transforms the (X,Y,Z)-shaped tensors into ((X,Y),Z)-shaped tensors
   //     with the understanding that the TMA is responsible for everything in mode-0.
   //   The tma_partition reorders and offsets mode-0 according to the tma_x atom and the multicast info.
+  //   Call-chain note:
+  //     gemm_device() -> tma_partition() in copy_traits_sm90_tma.hpp
   //
 
   auto [tAgA, tAsA] = tma_partition(tma_a, Int<0>{}, Layout<_1>{},
@@ -130,6 +197,15 @@ gemm_device(ProblemShape shape_MNK, CtaTiler cta_tiler,
 
   auto [tBgB, tBsB] = tma_partition(tma_b, Int<0>{}, Layout<_1>{},
                                     group_modes<0,2>(sB), group_modes<0,2>(gB));  // (TMA,k) and (TMA,PIPE)
+
+#if CUTE_DEBUG_TMA_GBASIS
+  if (do_trace) {
+    print("  tAgA (src: tma_partition(...A...).first) : "); print(tAgA); print("\n");
+    print("  tAsA (src: tma_partition(...A...).second) : "); print(tAsA); print("\n");
+    print("  tBgB (src: tma_partition(...B...).first) : "); print(tBgB); print("\n");
+    print("  tBsB (src: tma_partition(...B...).second) : "); print(tBsB); print("\n");
+  }
+#endif
 
   // The TMA is responsible for copying everything in mode-0 of tAsA and tBsB
   constexpr int tma_transaction_bytes = sizeof(make_tensor_like(tensor<0>(tAsA)))
@@ -145,6 +221,15 @@ gemm_device(ProblemShape shape_MNK, CtaTiler cta_tiler,
   int k_tile_count = size<1>(tAgA);
   // Current tile index in gmem to read from
   int k_tile = 0;
+
+#if CUTE_DEBUG_TMA_GBASIS
+  if (do_trace) {
+    print("  tma_transaction_bytes (src: sizeof(make_tensor_like(tensor<0>(tAsA))) + sizeof(make_tensor_like(tensor<0>(tBsB)))) : ");
+    print(tma_transaction_bytes); print("\n");
+    print("  K_PIPE_MAX (src: size<1>(tAsA)) : "); print(K_PIPE_MAX); print("\n");
+    print("  k_tile_count init (src: size<1>(tAgA)) : "); print(k_tile_count); print("\n");
+  }
+#endif
 
   // Initialize Barriers
   int warp_idx = cutlass::canonical_warp_idx_sync();
@@ -225,6 +310,8 @@ gemm_device(ProblemShape shape_MNK, CtaTiler cta_tiler,
     ProducerBarType::wait(&producer_mbar[read_pipe], read_state.phase());
 
     // MMAs to cover 1 K_TILE
+    // Call-chain note:
+    //   gemm_device() -> gemm(mma, ...) where mma is the SM90 WGMMA tiled MMA object.
     warpgroup_arrive();
     gemm(mma, tCrA(_,_,_,read_pipe), tCrB(_,_,_,read_pipe), tCrC);     // (V,M) x (V,N) => (V,M,N)
     warpgroup_commit_batch();
@@ -256,9 +343,17 @@ gemm_device(ProblemShape shape_MNK, CtaTiler cta_tiler,
   //
 
   axpby(alpha, tCrC, beta, tCgC);
+
+#if CUTE_DEBUG_TMA_GBASIS
+  if (do_trace) {
+    print("[TMA trace][device] gemm_device end\n");
+  }
+#endif
 }
 
 // Setup params for an NT GEMM
+// Called by gemm() when transA='N' and transB='T'.
+// It builds TMA atoms, configures launch params, and launches gemm_device().
 template <class TA, class TB, class TC,
           class Alpha, class Beta>
 void
@@ -270,6 +365,17 @@ gemm_nt(int m, int n, int k,
         TC      * C, int ldC,
         cudaStream_t stream = 0)
 {
+#if CUTE_DEBUG_TMA_GBASIS
+  // Host print budget for this function.
+  static int trace_budget = 3;
+  bool do_trace = tma_host_trace_enabled(trace_budget);
+  if (do_trace) {
+    tma_host_trace_banner("gemm_nt");
+    printf("  call chain: gemm -> gemm_nt -> gemm_device -> tma_partition\n");
+    printf("  input args: m=%d n=%d k=%d ldA=%d ldB=%d ldC=%d\n", m, n, k, ldA, ldB, ldC);
+  }
+#endif
+
   // Define shapes (dynamic)
   auto M = int(m);
   auto N = int(n);
@@ -301,8 +407,18 @@ gemm_nt(int m, int n, int k,
   Tensor mB = make_tensor(B, make_shape(N,K), dB);
 
   // Create TMA Atoms with the desired copy operation on the source and destination
+  // Header call chain:
+  // make_tma_atom() -> make_tma_copy_atom() -> construct_tma_gbasis() -> make_tma_copy_desc()
   Copy_Atom tmaA = make_tma_atom(SM90_TMA_LOAD{}, mA, sA(_,_,0), make_shape(bM,bK));
   Copy_Atom tmaB = make_tma_atom(SM90_TMA_LOAD{}, mB, sB(_,_,0), make_shape(bN,bK));
+
+#if CUTE_DEBUG_TMA_GBASIS
+  if (do_trace) {
+    print("  cta_tiler (src: make_shape(bM,bN,bK)) : "); print(cta_tiler); print("\n");
+    print("  sA(_,_,0) (src: slayout passed into make_tma_atom for A) : "); print(sA(_,_,0)); print("\n");
+    print("  sB(_,_,0) (src: slayout passed into make_tma_atom for B) : "); print(sB(_,_,0)); print("\n");
+  }
+#endif
 
   //
   // Setup and Launch
@@ -328,7 +444,19 @@ gemm_nt(int m, int n, int k,
     cudaFuncAttributeMaxDynamicSharedMemorySize,
     smem_size));
 
+#if CUTE_DEBUG_TMA_GBASIS
+  if (do_trace) {
+    printf("  launch gemm_device: grid=(%u,%u,%u) block=(%u,%u,%u) cluster=(%u,%u,%u) smem=%dB\n",
+           dimGrid.x, dimGrid.y, dimGrid.z,
+           dimBlock.x, dimBlock.y, dimBlock.z,
+           dimCluster.x, dimCluster.y, dimCluster.z,
+           smem_size);
+  }
+#endif
+
   // Kernel Launch
+  // Launch target:
+  // gemm_device<...>(prob_shape, cta_tiler, A, tmaA, B, tmaB, C, dC, tiled_mma, alpha, beta)
   cutlass::Status status = cutlass::launch_kernel_on_cluster(params, kernel_ptr,
                                                              prob_shape, cta_tiler,
                                                              A, tmaA,
@@ -340,9 +468,17 @@ gemm_nt(int m, int n, int k,
   if (status != cutlass::Status::kSuccess) {
     std::cerr << "Error: Failed at kernel Launch" << std::endl;
   }
+
+#if CUTE_DEBUG_TMA_GBASIS
+  if (do_trace) {
+    printf("[TMA trace][host] gemm_nt end\n");
+  }
+#endif
 }
 
 // Setup params for a TN GEMM
+// Called by gemm() when transA='T' and transB='N'.
+// It mirrors gemm_nt() with the K-major MMA/SMEM configuration.
 template <class TA, class TB, class TC,
           class Alpha, class Beta>
 void
@@ -354,6 +490,17 @@ gemm_tn(int m, int n, int k,
         TC      * C, int ldC,
         cudaStream_t stream = 0)
 {
+#if CUTE_DEBUG_TMA_GBASIS
+  // Host print budget for this function.
+  static int trace_budget = 3;
+  bool do_trace = tma_host_trace_enabled(trace_budget);
+  if (do_trace) {
+    tma_host_trace_banner("gemm_tn");
+    printf("  call chain: gemm -> gemm_tn -> gemm_device -> tma_partition\n");
+    printf("  input args: m=%d n=%d k=%d ldA=%d ldB=%d ldC=%d\n", m, n, k, ldA, ldB, ldC);
+  }
+#endif
+
   // Define shapes (dynamic)
   auto M = int(m);
   auto N = int(n);
@@ -385,8 +532,18 @@ gemm_tn(int m, int n, int k,
   Tensor mB = make_tensor(B, make_shape(N,K), dB);
 
   // Create TMA Atoms with the desired copy operation on the source and destination
+  // Header call chain:
+  // make_tma_atom() -> make_tma_copy_atom() -> construct_tma_gbasis() -> make_tma_copy_desc()
   Copy_Atom tmaA = make_tma_atom(SM90_TMA_LOAD{}, mA, sA(_,_,0), make_shape(bM,bK));
   Copy_Atom tmaB = make_tma_atom(SM90_TMA_LOAD{}, mB, sB(_,_,0), make_shape(bN,bK));
+
+#if CUTE_DEBUG_TMA_GBASIS
+  if (do_trace) {
+    print("  cta_tiler (src: make_shape(bM,bN,bK)) : "); print(cta_tiler); print("\n");
+    print("  sA(_,_,0) (src: slayout passed into make_tma_atom for A) : "); print(sA(_,_,0)); print("\n");
+    print("  sB(_,_,0) (src: slayout passed into make_tma_atom for B) : "); print(sB(_,_,0)); print("\n");
+  }
+#endif
 
   //
   // Setup and Launch
@@ -409,7 +566,19 @@ gemm_tn(int m, int n, int k,
                                         cudaFuncAttributeMaxDynamicSharedMemorySize,
                                         smemBytes));
 
+#if CUTE_DEBUG_TMA_GBASIS
+  if (do_trace) {
+    printf("  launch gemm_device: grid=(%u,%u,%u) block=(%u,%u,%u) cluster=(%u,%u,%u) smem=%dB\n",
+           dimGrid.x, dimGrid.y, dimGrid.z,
+           dimBlock.x, dimBlock.y, dimBlock.z,
+           dimCluster.x, dimCluster.y, dimCluster.z,
+           smemBytes);
+  }
+#endif
+
   // Kernel Launch
+  // Launch target:
+  // gemm_device<...>(prob_shape, cta_tiler, A, tmaA, B, tmaB, C, dC, tiled_mma, alpha, beta)
   cutlass::ClusterLaunchParams params = {dimGrid, dimBlock, dimCluster, smemBytes};
   cutlass::Status status = cutlass::launch_kernel_on_cluster(params, (void const*) kernel_ptr,
                                                              prob_shape, cta_tiler,
@@ -422,6 +591,12 @@ gemm_tn(int m, int n, int k,
   if (status != cutlass::Status::kSuccess) {
     std::cerr << "Error: Failed at kernel Launch" << std::endl;
   }
+
+#if CUTE_DEBUG_TMA_GBASIS
+  if (do_trace) {
+    printf("[TMA trace][host] gemm_tn end\n");
+  }
+#endif
 }
 
 template <class TA, class TB, class TC,
@@ -435,10 +610,31 @@ gemm(char transA, char transB, int m, int n, int k,
      TC      * C, int ldC,
      cudaStream_t stream = 0)
 {
+  // Host dispatcher in call chain:
+  // chooses gemm_nt() or gemm_tn() based on transpose flags.
+#if CUTE_DEBUG_TMA_GBASIS
+  static int trace_budget = 6;
+  bool do_trace = tma_host_trace_enabled(trace_budget);
+  if (do_trace) {
+    tma_host_trace_banner("gemm");
+    printf("  input args: transA=%c transB=%c m=%d n=%d k=%d ldA=%d ldB=%d ldC=%d\n",
+           transA, transB, m, n, k, ldA, ldB, ldC);
+  }
+#endif
   if (transA == 'N' && transB == 'T') {
+#if CUTE_DEBUG_TMA_GBASIS
+    if (do_trace) {
+      printf("  dispatch -> gemm_nt\n");
+    }
+#endif
     return gemm_nt(m, n, k, alpha, A, ldA, B, ldB, beta, C, ldC, stream);
   } else
   if (transA == 'T' && transB == 'N') {
+#if CUTE_DEBUG_TMA_GBASIS
+    if (do_trace) {
+      printf("  dispatch -> gemm_tn\n");
+    }
+#endif
     return gemm_tn(m, n, k, alpha, A, ldA, B, ldB, beta, C, ldC, stream);
   }
   assert(false && "Not implemented");
@@ -446,6 +642,10 @@ gemm(char transA, char transB, int m, int n, int k,
 
 int main(int argc, char** argv)
 {
+  // Entry of the tutorial executable.
+  // Call chain:
+  // main() -> gemm() -> gemm_nt/gemm_tn() -> gemm_device() -> tma_partition().
+
   cudaDeviceProp props;
   int current_device_id;
   cudaGetDevice(&current_device_id);
@@ -527,7 +727,15 @@ int main(int argc, char** argv)
     assert(false);
   }
 
+#if CUTE_DEBUG_TMA_GBASIS
+  printf("\n[TMA trace][host] main\n");
+  printf("  call chain: main -> gemm -> gemm_nt/gemm_tn -> gemm_device -> tma_partition\n");
+  printf("  runtime args: transA=%c transB=%c m=%d n=%d k=%d timing_iterations=%d\n",
+         transA, transB, m, n, k, timing_iterations);
+#endif
+
   // Run once
+  // Warmup/functional run before timing.
   d_C = h_C;
   gemm(transA, transB, m, n, k,
        alpha,
@@ -539,6 +747,7 @@ int main(int argc, char** argv)
   thrust::host_vector<TC> cute_result = d_C;
 
   // Timing iterations
+  // Throughput timing loop (debug prints are budget-limited to avoid flooding).
   timer.start();
   for (int i = 0; i < timing_iterations; ++i) {
     gemm(transA, transB, m, n, k,

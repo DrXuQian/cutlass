@@ -1,0 +1,269 @@
+:root {
+  color-scheme: light;
+  --bg: #0b1020;
+  --panel: #101a33;
+  --border: #22305a;
+  --text: #e6ecff;
+  --muted: rgba(230, 236, 255, 0.75);
+  --mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono",
+    "Courier New", monospace;
+  --sans: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial,
+    "Apple Color Emoji", "Segoe UI Emoji";
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: var(--sans);
+  background: radial-gradient(1200px 700px at 25% 10%, #152553 0%, var(--bg) 60%);
+  color: var(--text);
+}
+
+code,
+pre {
+  font-family: var(--mono);
+}
+
+.topbar {
+  padding: 16px 18px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(0, 0, 0, 0.18);
+  backdrop-filter: blur(8px);
+}
+
+.title {
+  font-size: 18px;
+  font-weight: 700;
+  letter-spacing: 0.2px;
+}
+
+.subtitle {
+  margin-top: 6px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+  padding: 12px 18px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.controls .spacer {
+  flex: 1 1 auto;
+}
+
+.controls input[type="number"] {
+  width: 80px;
+  background: rgba(0, 0, 0, 0.25);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 6px 8px;
+}
+
+.controls input[type="range"] {
+  width: 220px;
+}
+
+.threadInfo {
+  font-size: 12px;
+  color: var(--muted);
+  min-width: 140px;
+}
+
+.controls label {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.controls input[type="file"] {
+  width: 220px;
+}
+
+.controls select {
+  background: rgba(0, 0, 0, 0.25);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 6px 8px;
+}
+
+.controls button {
+  background: linear-gradient(180deg, rgba(90, 130, 255, 0.35), rgba(90, 130, 255, 0.18));
+  color: var(--text);
+  border: 1px solid rgba(90, 130, 255, 0.5);
+  border-radius: 10px;
+  padding: 8px 10px;
+  cursor: pointer;
+}
+
+.controls button:hover {
+  filter: brightness(1.05);
+}
+
+.controls details.advanced {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.controls details.advanced summary {
+  cursor: pointer;
+  user-select: none;
+}
+
+.controls details.advanced[open] {
+  padding: 8px 10px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 12px;
+  background: rgba(0, 0, 0, 0.14);
+}
+
+.layout {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+  padding: 12px 12px 18px;
+}
+
+@media (max-width: 1100px) {
+  .layout {
+    grid-template-columns: 1fr;
+  }
+}
+
+.panel {
+  background: rgba(16, 26, 51, 0.7);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 14px;
+  padding: 12px;
+  overflow: hidden;
+}
+
+.panel h2 {
+  margin: 0 0 6px;
+  font-size: 14px;
+  letter-spacing: 0.2px;
+}
+
+.panel .hint {
+  font-weight: 400;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.meta {
+  color: var(--muted);
+  font-size: 12px;
+  margin-bottom: 10px;
+  line-height: 1.35;
+}
+
+.gridWrap {
+  overflow: auto;
+  padding-bottom: 8px;
+}
+
+.grid {
+  display: grid;
+  gap: 2px;
+  align-items: stretch;
+  user-select: none;
+}
+
+.cell {
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 6px;
+  padding: 4px 4px;
+  font-size: 10px;
+  line-height: 1;
+  background: rgba(0, 0, 0, 0.15);
+  text-align: center;
+  cursor: pointer;
+}
+
+.cell.header {
+  cursor: default;
+  background: rgba(0, 0, 0, 0.28);
+  font-weight: 700;
+  color: rgba(230, 236, 255, 0.95);
+}
+
+.cell.rowlab {
+  cursor: default;
+  background: rgba(0, 0, 0, 0.22);
+  font-weight: 700;
+  text-align: right;
+  padding-right: 8px;
+}
+
+.cell[data-kind="src"] {
+  background: rgba(90, 130, 255, 0.10);
+}
+
+.cell[data-kind="dst"] {
+  background: rgba(65, 205, 140, 0.10);
+}
+
+.cell.hl {
+  outline: 2px solid rgba(255, 220, 140, 0.95);
+  outline-offset: -1px;
+}
+
+.cell.focus {
+  outline: 2px solid rgba(140, 255, 210, 0.95);
+  outline-offset: -1px;
+}
+
+.cell.pin {
+  outline: 2px solid rgba(255, 140, 200, 0.95);
+  outline-offset: -1px;
+}
+
+.cell.mem {
+  padding: 2px 2px;
+  border-radius: 4px;
+  font-size: 9px;
+}
+
+.cell.empty {
+  opacity: 0.25;
+  cursor: default;
+}
+
+.inspector pre {
+  margin: 8px 0 0;
+  padding: 10px;
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(0, 0, 0, 0.22);
+  color: rgba(230, 236, 255, 0.95);
+  min-height: 220px;
+  white-space: pre-wrap;
+}
+
+.insHint {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.footer {
+  padding: 12px 18px 18px;
+  color: var(--muted);
+  font-size: 12px;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.footer .small {
+  margin-top: 6px;
+  opacity: 0.9;
+}

@@ -720,6 +720,30 @@ coalesce_256(Layout<Shape,Stride> const& layout)
   return coalesce_256_impl<1>(flat_shape, flat_stride, get<0>(flat_shape), get<0>(flat_stride));
 }
 
+// ============================================================================
+// construct_tma_gbasis
+// ============================================================================
+// 功能：
+//   从 (gtensor, slayout, cta_v_map) 推导出 tma_gbasis（TMA box -> GMEM mode 映射）。
+//
+// 输入：
+//   - gtensor: 原始 GMEM Tensor
+//   - slayout: CTA tile 对应的 SMEM layout（可含 swizzle）
+//   - cta_v_map: CTA value index -> GMEM mode 的映射
+//
+// 输出：
+//   - tma_gbasis: 供后续 make_tma_copy_desc 使用的 basis layout
+//
+// 主要阶段：
+//   1) 反演/组合 SMEM 映射，得到 smem_idx -> gmem_mode 的向量化映射；
+//   2) 截断不兼容模式，得到可用于 TMA 的 gmode 子空间；
+//   3) 按 TmaInternalType 重解释并 coalesce；
+//   4) 补齐遗漏 basis，并将 rank 限制到 TMA 支持的最大维度。
+// ============================================================================
+#ifndef CUTE_DEBUG_TMA_GBASIS
+#define CUTE_DEBUG_TMA_GBASIS 0
+#endif
+
 template <class TmaInternalType,
           class GEngine, class GLayout,
           class SShape, class SStride,
@@ -739,10 +763,11 @@ construct_tma_gbasis(Tensor<GEngine,GLayout> const& gtensor,       // The origin
   CUTE_STATIC_ASSERT_V(size(slayout) == size(cta_v_map),
                        "TMA requires CTA_Tile and SLayout top-level size equivalence.");
 
-#if 0
-  print("gtensor         : "); print(gtensor); print("\n");
-  print("slayout         : "); print(slayout); print("\n");
-  print("cta_v_map       : "); print(cta_v_map); print("\n");
+#if CUTE_DEBUG_TMA_GBASIS
+  print("\n[construct_tma_gbasis] begin\n");
+  print("  gtensor  (src: input gtensor)  : "); print(gtensor); print("\n");
+  print("  slayout  (src: input slayout)  : "); print(slayout); print("\n");
+  print("  cta_v_map(src: input cta_v_map): "); print(cta_v_map); print("\n");
 #endif
 
   //
@@ -752,14 +777,17 @@ construct_tma_gbasis(Tensor<GEngine,GLayout> const& gtensor,       // The origin
   // Invert the smem to get the largest contiguous vector in the smem layout
   // smem idx -> smem coord
   auto inv_smem_layout = right_inverse(get_nonswizzle_portion(slayout));
+#if CUTE_DEBUG_TMA_GBASIS
+  print("  inv_smem_layout (src: right_inverse(get_nonswizzle_portion(slayout))) : ");
+  print(inv_smem_layout); print("\n");
+#endif
 
   // Compose with the V-Map to convert smem coord (CTA val idx) to gmem mode
   // smem idx -> gmem mode
   auto sidx2gmode_full = coalesce(composition(cta_v_map, inv_smem_layout));
-
-#if 0
-  print("inv_smem_layout : "); print(inv_smem_layout); print("\n");
-  print("sidx2gmode_full : "); print(sidx2gmode_full); print("\n");
+#if CUTE_DEBUG_TMA_GBASIS
+  print("  sidx2gmode_full (src: coalesce(composition(cta_v_map, inv_smem_layout))) : ");
+  print(sidx2gmode_full); print("\n");
 #endif
 
   //
@@ -772,13 +800,16 @@ construct_tma_gbasis(Tensor<GEngine,GLayout> const& gtensor,       // The origin
     return not is_constant<1,decltype(v)>{};
   });
   static_assert(smem_rank > 0, "Could not find a common tile-gmem vectorization. Does the Tile select out major GMEM modes?");
+#if CUTE_DEBUG_TMA_GBASIS
+  print("  smem_rank (src: find_if(stride(sidx2gmode_full), basis_value!=1)) : ");
+  print(smem_rank); print("\n");
+#endif
 
   // Keep only the static-1 basis modes into gmem
   auto sidx2gmode = take<0,smem_rank>(sidx2gmode_full);
-
-#if 0
-  print("smem_rank  : "); print(smem_rank); print("\n");
-  print("sidx2gmode : "); print(sidx2gmode); print("\n");
+#if CUTE_DEBUG_TMA_GBASIS
+  print("  sidx2gmode (src: take<0,smem_rank>(sidx2gmode_full)) : ");
+  print(sidx2gmode); print("\n");
 #endif
 
   //
@@ -788,23 +819,51 @@ construct_tma_gbasis(Tensor<GEngine,GLayout> const& gtensor,       // The origin
   // The smem vector is the same units as gtensor, so compose first and then recast
   // tma_val_idx:gmem_strides
   auto tile_gstride = recast<TmaInternalType>(gtensor.compose(sidx2gmode)).layout();
+#if CUTE_DEBUG_TMA_GBASIS
+  print("  tile_gstride (src: recast<TmaInternalType>(gtensor.compose(sidx2gmode)).layout()) : ");
+  print(tile_gstride); print("\n");
+#endif
   // Coalesce modes up to size-256 (the maximum TMA box extent in units of TmaInternalType)
   // tma_box_shape:gmem_strides
   auto tma_gstride  = coalesce_256(tile_gstride);
+#if CUTE_DEBUG_TMA_GBASIS
+  print("  tma_gstride (src: coalesce_256(tile_gstride)) : ");
+  print(tma_gstride); print("\n");
+#endif
 
   // Perform the tiling, recast, and coalesce to the gmem vector again, but with indirections to the gtensor modes
   auto gbasis = make_identity_layout(shape(gtensor));
+#if CUTE_DEBUG_TMA_GBASIS
+  print("  gbasis (src: make_identity_layout(shape(gtensor))) : ");
+  print(gbasis); print("\n");
+#endif
   auto tile_gbasis_tmp = gbasis.compose(sidx2gmode);
+#if CUTE_DEBUG_TMA_GBASIS
+  print("  tile_gbasis_tmp (src: gbasis.compose(sidx2gmode)) : ");
+  print(tile_gbasis_tmp); print("\n");
+#endif
 
   // Instead of the recast (gbasis doesn't have type info), replace the shape with the already-recasted shape
   // tma_box_shape:gmem_mode
   auto tile_gbasis = make_layout(shape(tile_gstride), stride(tile_gbasis_tmp));
+#if CUTE_DEBUG_TMA_GBASIS
+  print("  tile_gbasis (src: make_layout(shape(tile_gstride), stride(tile_gbasis_tmp))) : ");
+  print(tile_gbasis); print("\n");
+#endif
 
   // "Coalesce" the tile basis into a compatible shape with the tma_gstride
   auto tma_gbasis_tile = tile_gbasis.compose(make_layout(wrap(shape(tma_gstride))));
+#if CUTE_DEBUG_TMA_GBASIS
+  print("  tma_gbasis_tile (src: tile_gbasis.compose(make_layout(wrap(shape(tma_gstride))))) : ");
+  print(tma_gbasis_tile); print("\n");
+#endif
 
   // Recast the original tensor for shape/stride inspections
   Tensor gtensor_T = recast<TmaInternalType>(gtensor);
+#if CUTE_DEBUG_TMA_GBASIS
+  print("  gtensor_T (src: recast<TmaInternalType>(gtensor)) : ");
+  print(gtensor_T); print("\n");
+#endif
 
   // Find missing bases that don't appear in tile_gbasis
   auto tile_gbasis_remaining_stride = filter_tuple(flatten(shape (gtensor_T)), flatten(stride(gtensor_T)),
@@ -823,27 +882,59 @@ construct_tma_gbasis(Tensor<GEngine,GLayout> const& gtensor,       // The origin
       }
     }
   });
+#if CUTE_DEBUG_TMA_GBASIS
+  print("  tile_gbasis_remaining_stride (src: filter_tuple(..., flatten(stride(tma_gbasis_tile)) membership check)) : ");
+  print(tile_gbasis_remaining_stride); print("\n");
+#endif
 
   // Append the remaining basis modes that contribute to the TMA with size-1
   auto tile_gbasis_remaining_shape = repeat<rank(tile_gbasis_remaining_stride)>(Int<1>{});
+#if CUTE_DEBUG_TMA_GBASIS
+  print("  tile_gbasis_remaining_shape (src: repeat<rank(tile_gbasis_remaining_stride)>(Int<1>{})) : ");
+  print(tile_gbasis_remaining_shape); print("\n");
+#endif
   auto tma_gbasis_full = make_layout(tuple_cat(wrap( shape(tma_gbasis_tile)), wrap(tile_gbasis_remaining_shape )),
                                      tuple_cat(wrap(stride(tma_gbasis_tile)), wrap(tile_gbasis_remaining_stride)));
+#if CUTE_DEBUG_TMA_GBASIS
+  print("  tma_gbasis_full (src: make_layout(tuple_cat(shape parts), tuple_cat(stride parts))) : ");
+  print(tma_gbasis_full); print("\n");
+#endif
 
   // Group the trailing modes to make this max rank-5 -- TMA rank limitation
   // tma_box_shape:gmem_mode
   auto tma_gbasis = group<cute::min(rank(tma_gbasis_full),4),-1>(tma_gbasis_full);
-
-#if 0
-  print("tile_gstride : "); print(tile_gstride); print("\n");
-  print("tma_gstride  : "); print(tma_gstride); print("\n");
-  print("gbasis       : "); print(gbasis); print("\n");
-  print("tile_gbasis  : "); print(tma_gbasis_tile); print("\n");
-  print("tma_gbasis   : "); print(tma_gbasis); print("\n");
+#if CUTE_DEBUG_TMA_GBASIS
+  print("  tma_gbasis (src: group<min(rank(tma_gbasis_full),4),-1>(tma_gbasis_full)) : ");
+  print(tma_gbasis); print("\n");
+  print("[construct_tma_gbasis] end\n");
 #endif
 
   return tma_gbasis;
 }
 
+// ============================================================================
+// fill_tma_gmem_shape_stride
+// ============================================================================
+// 功能：根据 GMEM tensor 的 layout 和 TMA basis stride 映射，
+//       填充 TMA descriptor 所需的 GMEM shape 和 stride 数组
+//
+// 参数：
+//   gtensor           - GMEM Tensor，其 value_type 已经是 TmaInternalType
+//   tma_gbasis_stride - TMA mode → GMEM mode(s) 的映射
+//                       例如：(E<0>, E<1>) 表示 TMA dim0 ← GMEM dim0, TMA dim1 ← GMEM dim1
+//                       也可以是 ((E<0>, E<2>), E<1>) 表示 TMA dim0 ← GMEM dim0 和 dim2 合并
+//   gmem_prob_shape   - 输出：TMA 各维度的 size（最多 5 维）
+//   gmem_prob_stride  - 输出：TMA 各维度的 stride（元素为单位，后续会转为字节）
+//
+// 工作原理：
+//   遍历每个 TMA 维度 i，根据 tma_gbasis_stride[i] 确定它对应哪些 GMEM 维度，
+//   然后提取或合并这些维度的 shape 和 stride。
+//
+// 示例：
+//   gtensor: shape=(128, 64), stride=(64, 1)  (row-major 128x64 矩阵)
+//   tma_gbasis_stride = (E<1>, E<0>)  // 转置：TMA 连续维度取 GMEM 的 dim1
+//   输出：gmem_prob_shape = [64, 128], gmem_prob_stride = [1, 64]
+// ============================================================================
 template <class GEngine, class GLayout,
           class TmaGmemBasisStride,
           class ShapeT, size_t TmaRank>
@@ -863,15 +954,34 @@ fill_tma_gmem_shape_stride(Tensor<GEngine,GLayout>   const& gtensor,           /
 
   auto gmem_shape  =  shape(gtensor);
   auto gmem_stride = stride(gtensor);
+
+  // 遍历每个 TMA 维度，使用 tma_gbasis_stride 中的间接索引来构建 TMA 的 shape/stride
   // Use the indirections in tma_gbasis_stride into gtensor to construct the tma gmem shapes/strides
   for_each(make_seq<tma_rank>{}, [&](auto i) {
     constexpr int tma_i_rank = decltype(rank<i>(tma_gbasis_stride))::value;
+
     if constexpr (tma_i_rank == 1) {
+      // ========== Case 1: 简单映射 ==========
+      // 一个 TMA 维度对应一个 GMEM 维度
+      // 例如：tma_gbasis_stride[i] = E<j>
       // Trivial contribution of this gmem mode to this tma mode
       auto ej = unwrap(get<i>(tma_gbasis_stride));
-      gmem_prob_shape[i]  = basis_get(ej, gmem_shape);
-      gmem_prob_stride[i] = basis_get(ej, gmem_stride);
+      gmem_prob_shape[i]  = basis_get(ej, gmem_shape);   // 直接取 GMEM 第 j 维的 size
+      gmem_prob_stride[i] = basis_get(ej, gmem_stride);  // 直接取 GMEM 第 j 维的 stride
     } else {
+      // ========== Case 2: 复合映射（多个 GMEM 维度合并到一个 TMA 维度）==========
+      // 例如：tma_gbasis_stride[i] = (E<j1>, E<j2>, ...)
+      // 需要使用递推公式计算合并后的 shape 和 stride
+      //
+      // 递推公式原理：
+      //   当多个维度合并时，计算它们共同覆盖的"逻辑范围"
+      //   - 合并后的 stride = gcd(所有参与维度的 stride)
+      //   - 合并后的 shape = 所有维度覆盖的总范围 / 合并后的 stride
+      //
+      // 例如：dim A: size=4, stride=1 → 覆盖 [0,1,2,3]
+      //       dim B: size=3, stride=4 → 覆盖 [0,4,8]
+      //       合并：stride=gcd(1,4)=1, shape = 3+(4-1)*(1/1)+(3-1)*(4/1)+1 = 12
+      //             覆盖 [0..11]
       // Apply a recurrence to each gmem mode that contributes to this tma mode
       for_each(get<i>(tma_gbasis_stride), [&](auto ej) {
         // Problem shape
@@ -879,14 +989,22 @@ fill_tma_gmem_shape_stride(Tensor<GEngine,GLayout>   const& gtensor,           /
         // Problem stride (in bytes)
         uint64_t stride_j = basis_get(ej, gmem_stride);
         uint64_t old_stride = gmem_prob_stride[i];
+
+        // 新 stride = gcd(原 stride, 当前维度的 stride)
         gmem_prob_stride[i] = gcd(gmem_prob_stride[i], stride_j);
 
         if (gmem_prob_stride[i] != 0) {
+          // 递推公式：合并后的 shape
+          // g_shape_new = (g_shape_old - 1) * (old_stride / new_stride)
+          //             + (shape_j - 1) * (stride_j / new_stride)
+          //             + 1
+          // 这计算的是所有参与维度覆盖的最大偏移量 / 最小步长 + 1
           // Recurrence: g_shape = (s_i - 1) * (d_i / gcd_j d_j) + 1
           gmem_prob_shape[i] = (gmem_prob_shape[i]-1) * (old_stride / gmem_prob_stride[i])
                              +            (shape_j-1) * (stride_j   / gmem_prob_stride[i])
                              + 1;
         } else {
+          // stride 为 0 的特殊情况（broadcast）
           gmem_prob_shape[i] = shape_j;
         }
       });
@@ -909,6 +1027,42 @@ fill_tma_gmem_shape_stride(Copy_Traits<Op,Bits,Aux>  const& tma_traits,
                                     gmem_prob_shape, gmem_prob_stride);
 }
 
+// ============================================================================
+// make_tma_copy_desc
+// ============================================================================
+// 功能：创建 TMA descriptor，这是 TMA 操作的核心配置结构
+//
+// 主要工作：
+//   1. 从 GMEM tensor 提取 shape/stride 信息，转换为 TMA 格式
+//   2. 计算 SMEM box 尺寸（考虑 multicast）
+//   3. 调用 CUDA Driver API cuTensorMapEncodeTiled 创建 descriptor
+//   4. 构建 gmem_tma_basis_stride：GMEM 坐标 → TMA 坐标的映射
+//
+// 参数：
+//   gtensor      - 原始 GMEM Tensor（完整矩阵）
+//   tma_gbasis   - TMA box 的 shape 和 stride，描述 box 如何映射到 GMEM
+//                  shape: box 各维度大小
+//                  stride: 包含 E<i> basis，指示该 TMA 维度对应哪个 GMEM 维度
+//   swizzle      - SMEM swizzle 模式 (Swizzle<B,M,S>)
+//   num_multicast - multicast 的 CTA 数量（1 表示无 multicast）
+//
+// 返回值：
+//   tuple<TmaDescriptor, AuxParams>
+//   - TmaDescriptor: 传给 TMA PTX 指令的 128 字节描述符
+//   - AuxParams: 包含 gmem_tma_basis_stride，用于运行时计算 TMA 坐标
+//
+// 数据流：
+//   gtensor (GMEM layout) + tma_gbasis (box 映射)
+//          ↓
+//   gmem_prob_shape/stride (TMA 格式的 GMEM 信息)
+//          ↓
+//   smem_box_shape (考虑 multicast 缩小后的 box)
+//          ↓
+//   cuTensorMapEncodeTiled (CUDA Driver API)
+//          ↓
+//   TmaDescriptor + gmem_tma_basis_stride (坐标转换)
+// ============================================================================
+//
 // Use a sidx2gmode to read through the GMEM tensor
 //   and construct a TMA Descriptor for the resulting instruction
 // At the same time, construct the Tma Tensor's Stride to generate
@@ -925,29 +1079,78 @@ make_tma_copy_desc(Tensor<GEngine,GLayout> const& gtensor,         // The origin
                    Swizzle<B,M,S>          const& swizzle,         // Swizzle fn on smem_idx
                    uint32_t                       num_multicast)   // The number of CTAs in multicasting
 {
+#if CUTE_DEBUG_TMA_GBASIS
+  // Lightweight array printer used by debug traces below.
+  auto print_arr = [](char const* name, auto const& arr) {
+    print("  "); print(name); print(" : [");
+    for (int i = 0; i < 5; ++i) {
+      print(arr[i]);
+      if (i != 4) { print(", "); }
+    }
+    print("]\n");
+  };
+#endif
+
+  // ========================================================================
+  // 第一部分：提取 GMEM 信息
+  // ========================================================================
   //
   // TMA desc creation
   //
 
+  // TMA 维度数（最多 5 维）
+  // rank(layout) 返回 Int<N> 类型
+  // decltype 获取这个类型
+  // ::value 提取编译期常量 N
   constexpr int tma_dim = decltype(rank(tma_gbasis))::value;
+#if CUTE_DEBUG_TMA_GBASIS
+  print("\n[make_tma_copy_desc] begin\n");
+  print("  gtensor (src: input gtensor) : "); print(gtensor); print("\n");
+  print("  tma_gbasis (src: input tma_gbasis) : "); print(tma_gbasis); print("\n");
+  print("  swizzle (src: input swizzle) : "); print(swizzle); print("\n");
+  print("  num_multicast (src: input num_multicast) : "); print(num_multicast); print("\n");
+  print("  tma_dim (src: rank(tma_gbasis)) : "); print(tma_dim); print("\n");
+#endif
 
   //
   // TMA gmem desc info
   //
 
+  // 将 tensor 转换为 TmaInternalType 类型进行 shape/stride 检查
+  // 例如：原始类型是 half2，TmaInternalType 是 half，会重新计算维度
   // Recast the original tensor for shape/stride inspections
   Tensor gtensor_T = recast<TmaInternalType>(gtensor);
+#if CUTE_DEBUG_TMA_GBASIS
+  print("  gtensor_T (src: recast<TmaInternalType>(gtensor)) : "); print(gtensor_T); print("\n");
+#endif
 
+  // 提取 GMEM 基地址和 layout
   void* gmem_address = (void*) raw_pointer_cast(gtensor_T.data());
   auto  gmem_layout  = gtensor_T.layout();
+#if CUTE_DEBUG_TMA_GBASIS
+  print("  gmem_address (src: raw_pointer_cast(gtensor_T.data())) : ");
+  print("%p\n", gmem_address);
+  print("  gmem_layout (src: gtensor_T.layout()) : "); print(gmem_layout); print("\n");
+#endif
 
+  // TMA descriptor 需要的 GMEM shape 和 stride（最多 5 维）
+  // 初始化为 {1,1,1,1,1} 和 {0,0,0,0,0}
   cute::array<uint64_t, 5> gmem_prob_shape  = {1,1,1,1,1};
   cute::array<uint64_t, 5> gmem_prob_stride = {0,0,0,0,0};
 
+  // 根据 tma_gbasis 的 stride（包含 E<i> basis）填充 shape 和 stride
   fill_tma_gmem_shape_stride(gtensor_T, stride(tma_gbasis), gmem_prob_shape, gmem_prob_stride);
+#if CUTE_DEBUG_TMA_GBASIS
+  print_arr("gmem_prob_shape (src: fill_tma_gmem_shape_stride(...))", gmem_prob_shape);
+  print_arr("gmem_prob_stride[elem] (src: fill_tma_gmem_shape_stride(...))", gmem_prob_stride);
+#endif
 
+  // ========== GMEM 地址约束检查 ==========
+  // TMA 要求地址 16 字节对齐
   assert((reinterpret_cast<uint64_t>(gmem_address) & 0b1111) == 0);  // Address must be 16B-aligned
 
+  // ========== GMEM shape 约束检查 ==========
+  // 每个维度：1 ≤ size ≤ 2^32
   assert(gmem_prob_shape[0] >= (uint64_t(1)));               // Size must be min 1
   assert(gmem_prob_shape[0] <= (uint64_t(1) << 32));         // Size must be max 2^32
   assert(gmem_prob_shape[1] >= (uint64_t(1)));               // Size must be min 1
@@ -959,14 +1162,22 @@ make_tma_copy_desc(Tensor<GEngine,GLayout> const& gtensor,         // The origin
   assert(gmem_prob_shape[4] >= (uint64_t(1)));               // Size must be min 1
   assert(gmem_prob_shape[4] <= (uint64_t(1) << 32));         // Size must be max 2^32
 
+  // TMA 要求第 0 维（最内层维度）的 stride 必须是 1（连续存储）
+  // 这确保了 SMEM 的主维度和 GMEM 的主维度匹配
   // TMA descriptor does not store the zeroth stride and assumes it is 1 (TmaInternalType element).
   assert(gmem_prob_stride[0] == 1 && "Majorness of smem doesn't match majorness of gmem");
 
+  // 将元素 stride 转换为字节 stride（TMA descriptor 使用字节 stride）
   // convert strides to byte strides
   for(uint64_t& stride : gmem_prob_stride) {
     stride = (stride * sizeof_bits_v<TmaInternalType>) / 8;
   }
+#if CUTE_DEBUG_TMA_GBASIS
+  print_arr("gmem_prob_stride[byte] (src: stride *= sizeof_bits_v<TmaInternalType>/8)", gmem_prob_stride);
+#endif
 
+  // ========== GMEM stride 约束检查（字节单位）==========
+  // 每个维度：stride < 2^40，且必须是 16 字节的倍数
   // Assert the byte strides. Tma Descriptor uses byte strides
   assert((gmem_prob_stride[1]) < (uint64_t(1) << 40));       // Stride must be max 2^40
   assert((gmem_prob_stride[1] & 0b1111) == 0);               // Stride must be multiple of 16B (128b)
@@ -977,16 +1188,34 @@ make_tma_copy_desc(Tensor<GEngine,GLayout> const& gtensor,         // The origin
   assert((gmem_prob_stride[4]) < (uint64_t(1) << 40));       // Stride must be max 2^40
   assert((gmem_prob_stride[4] & 0b1111) == 0);               // Stride must be multiple of 16B (128b)
 
+  // ========================================================================
+  // 第二部分：计算 SMEM Box 信息
+  // ========================================================================
   //
   // TMA smem desc info
   //
 
+  // SMEM box 的 shape 和 stride
   cute::array<uint32_t, 5> smem_box_shape  = {1,1,1,1,1};
   cute::array<uint32_t, 5> smem_box_stride = {1,1,1,1,1};
+
+  // Box shape = tma_gbasis 各维度的 size
+  // 例如：tma_gbasis = Layout<Shape<_64, _32>, ...> → box = [64, 32, 1, 1, 1]
   // The smem box is simply given by the sizes of the modes in tma_gbasis
   for_each(make_seq<tma_dim>{}, [&](auto i) {
     smem_box_shape[i] *= size<i>(tma_gbasis);
   });
+#if CUTE_DEBUG_TMA_GBASIS
+  print_arr("smem_box_shape pre-mcast (src: for_each size<i>(tma_gbasis))", smem_box_shape);
+#endif
+
+  // 如果有 multicast，需要缩小 box 尺寸
+  // multicast 时多个 CTA 共同读取数据，每个 CTA 只负责一部分
+  // 从最后一个维度开始缩小，直到 multicast 因子消耗完
+  //
+  // 例如：box = [64, 32], multicast = 4
+  //   第一轮：smem_box_shape[1] = 32/4 = 8, multicast = 1
+  //   结果：box = [64, 8]（每个 CTA 读取 1/4）
   // Finally, truncate the tma box by the num_multicast
   for (uint32_t i = tma_dim-1, multicast = num_multicast; multicast > 1; --i) {
     assert(smem_box_shape[i] % multicast == 0 || multicast % smem_box_shape[i] == 0);
@@ -994,7 +1223,13 @@ make_tma_copy_desc(Tensor<GEngine,GLayout> const& gtensor,         // The origin
     smem_box_shape[i] = ceil_div(smem_box_shape[i], multicast);
     multicast = new_mult;
   }
+#if CUTE_DEBUG_TMA_GBASIS
+  print_arr("smem_box_shape post-mcast (src: truncation loop over num_multicast)", smem_box_shape);
+  print_arr("smem_box_stride (src: initialized constant {1,1,1,1,1})", smem_box_stride);
+#endif
 
+  // ========== SMEM box shape 约束检查 ==========
+  // 每个维度：1 ≤ size ≤ 256 (2^8)
   assert(smem_box_shape[0] >= (uint32_t(1)));                // Size must be min 1
   assert(smem_box_shape[0] <= (uint32_t(1) << 8));           // Size must be max 2^8 = 256
   assert(smem_box_shape[1] >= (uint32_t(1)));                // Size must be min 1
@@ -1006,6 +1241,9 @@ make_tma_copy_desc(Tensor<GEngine,GLayout> const& gtensor,         // The origin
   assert(smem_box_shape[4] >= (uint32_t(1)));                // Size must be min 1
   assert(smem_box_shape[4] <= (uint32_t(1) << 8));           // Size must be max 2^8 = 256
 
+  // ========== SMEM box stride 约束检查 ==========
+  // 每个维度：1 ≤ stride ≤ 8 (2^3)
+  // 注意：这里的 stride 是元素 stride，不是字节 stride
   assert(smem_box_stride[0] >= (uint32_t(1)));               // Stride must be min 1
   assert(smem_box_stride[0] <= (uint32_t(8)));               // Stride must be max 2^3 = 8
   assert(smem_box_stride[1] >= (uint32_t(1)));               // Stride must be min 1
@@ -1017,6 +1255,9 @@ make_tma_copy_desc(Tensor<GEngine,GLayout> const& gtensor,         // The origin
   assert(smem_box_stride[4] >= (uint32_t(1)));               // Stride must be min 1
   assert(smem_box_stride[4] <= (uint32_t(8)));               // Stride must be max 2^3 = 8
 
+  // ========================================================================
+  // 第三部分：调用 CUDA Driver API 创建 TMA Descriptor
+  // ========================================================================
     //
     // Construct the descriptor
     //
@@ -1029,29 +1270,57 @@ make_tma_copy_desc(Tensor<GEngine,GLayout> const& gtensor,         // The origin
 
   #if (__CUDACC_VER_MAJOR__ >= 12) && !defined(__CUDACC_RTC__)
 
+    // 数据类型映射：CuTe 类型 → CUDA 枚举
+    // 例如：half → CU_TENSOR_MAP_DATA_TYPE_FLOAT16
     CUtensorMapDataType     tma_format      = TMA::to_CUtensorMapDataType<TmaInternalType>();
+
+    // 交织模式：通常为 NONE
     CUtensorMapInterleave   tma_interleave  = CU_TENSOR_MAP_INTERLEAVE_NONE;
+
+    // L2 缓存提升策略：128 字节
     CUtensorMapL2promotion  tma_l2Promotion = CU_TENSOR_MAP_L2_PROMOTION_L2_128B;
+
+    // 越界填充：NONE 表示不填充（越界会出错）
     CUtensorMapFloatOOBfill tma_oobFill     = CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE;
 
+    // SMEM swizzle 配置
+    // Swizzle<B,M,S> 映射到 CUtensorMapSwizzle 枚举：
+    //   B=0 → NONE, B=1 → 32B, B=2 → 64B, B=3 → 128B
     // TMA smem swizzle type
     TMA::SmemSwizzleBits swizzle_bits = get_tma_swizzle_bits(swizzle);
     TMA::SmemSwizzleBase swizzle_base = get_tma_swizzle_base(swizzle);
     CUtensorMapSwizzle smem_swizzle = TMA::to_CUtensorMapSwizzle(swizzle_bits, swizzle_base);
+#if CUTE_DEBUG_TMA_GBASIS
+    print("  tma_format (src: to_CUtensorMapDataType<TmaInternalType>()) : "); print(int(tma_format)); print("\n");
+    print("  tma_interleave (src: CU_TENSOR_MAP_INTERLEAVE_NONE) : "); print(int(tma_interleave)); print("\n");
+    print("  tma_l2Promotion (src: CU_TENSOR_MAP_L2_PROMOTION_L2_128B) : "); print(int(tma_l2Promotion)); print("\n");
+    print("  tma_oobFill (src: CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE) : "); print(int(tma_oobFill)); print("\n");
+    print("  swizzle_bits (src: get_tma_swizzle_bits(swizzle)) : "); print(int(swizzle_bits)); print("\n");
+    print("  swizzle_base (src: get_tma_swizzle_base(swizzle)) : "); print(int(swizzle_base)); print("\n");
+    print("  smem_swizzle (src: to_CUtensorMapSwizzle(swizzle_bits, swizzle_base)) : "); print(int(smem_swizzle)); print("\n");
+#endif
+
+    // 调用 CUDA Driver API 创建 TMA descriptor
+    // 这个 API 会验证所有参数并填充 128 字节的 descriptor 结构
     CUresult result = CUTLASS_CUDA_DRIVER_WRAPPER_CALL(cuTensorMapEncodeTiled)(
         &tma_desc,
-        tma_format,
-        tma_dim,
-        gmem_address,
-        gmem_prob_shape.data(),
-        gmem_prob_stride.data() + 1,  // gmem_prob_stride[0] implicitly 1
-        smem_box_shape.data(),
-        smem_box_stride.data(),
-        tma_interleave,
-        smem_swizzle,
-        tma_l2Promotion,
-        tma_oobFill);
+        tma_format,                     // 数据类型
+        tma_dim,                        // 维度数（1-5）
+        gmem_address,                   // GMEM 基地址（16B 对齐）
+        gmem_prob_shape.data(),         // GMEM 各维度 size
+        gmem_prob_stride.data() + 1,    // GMEM 各维度 byte stride（跳过 dim0，它隐含为 1 元素）
+        smem_box_shape.data(),          // Box 各维度 size
+        smem_box_stride.data(),         // Box 各维度 element stride
+        tma_interleave,                 // 交织模式
+        smem_swizzle,                   // Swizzle 模式
+        tma_l2Promotion,                // L2 提升策略
+        tma_oobFill);                   // 越界填充
+#if CUTE_DEBUG_TMA_GBASIS
+    print("  cuTensorMapEncodeTiled result (src: CUTLASS_CUDA_DRIVER_WRAPPER_CALL(...)) : ");
+    print(int(result)); print("\n");
+#endif
 
+    // 错误处理：打印所有参数帮助调试
     if (result != CUDA_SUCCESS) {
       std::cerr << "TMA Desc Addr:   " << &tma_desc
                 << "\nformat         " << tma_format
@@ -1070,42 +1339,101 @@ make_tma_copy_desc(Tensor<GEngine,GLayout> const& gtensor,         // The origin
     }
 
   #endif // (__CUDACC_VER_MAJOR__ >= 12) && !defined(__CUDACC_RTC__)
+
+  // ========================================================================
+  // 第四部分：构建 gmem_tma_basis_stride（GMEM 坐标 → TMA 坐标的映射）
+  // ========================================================================
+  //
+  // 这是最复杂的部分。目的是构建一个映射，使得：
+  //   给定 GMEM tensor 中的坐标 (i, j, k, ...)
+  //   可以计算出对应的 TMA 坐标 (tma_coord_0, tma_coord_1, ...)
+  //
+  // 这个映射在运行时用于：
+  //   tma_coord = gtensor_coord * gmem_tma_basis_stride
+  //
+  // 例如：
+  //   gtensor: shape=(M, K), stride=(K, 1)  -- row-major
+  //   tma_gbasis: stride=(E<1>, E<0>)       -- TMA dim0 ← K, TMA dim1 ← M
+  //   gmem_tma_basis_stride = (E<1>, E<0>)  -- GMEM coord → TMA coord 的逆映射
+
+  // recast_ratio: 原始类型和 TMA 内部类型的大小比
+  // 例如：half2 / half = 2
   auto recast_ratio = cute::trait_ratio(sizeof_bits<typename GEngine::value_type>{},
                                         sizeof_bits<             TmaInternalType>{});
+#if CUTE_DEBUG_TMA_GBASIS
+  print("  recast_ratio (src: trait_ratio(sizeof_bits<GEngine::value_type>, sizeof_bits<TmaInternalType>)) : ");
+  print(recast_ratio); print("\n");
+#endif
 
+  // 为 gtensor 的每个维度创建 basis (E<0>, E<1>, ...)
   auto gbasis = make_basis_like(shape(gtensor));
+#if CUTE_DEBUG_TMA_GBASIS
+  print("  gbasis (src: make_basis_like(shape(gtensor))) : "); print(gbasis); print("\n");
+#endif
 
+  // transform_leaf 遍历 gbasis 的每个叶子节点（每个 E<i>）
+  // 对于每个 E<i>，计算它对应的 TMA 坐标贡献
+  //
+  // 本质上是构建 tma_gbasis 的"逆映射"：
+  //   tma_gbasis.stride = (E<j0>, E<j1>, ...)  -- TMA dim → GMEM dim
+  //   gmem_tma_basis_stride = (E<k0>, E<k1>, ...)  -- GMEM dim → TMA dim
   // Finally, get the inverse permutation of the E<i> bases for the mocked gmem stride
   auto gmem_tma_basis_stride = transform_leaf(gbasis, [&](auto ei) {
+    // ei 是当前处理的 GMEM 维度的 basis（如 E<0>、E<1>）
+
+    // 获取该 GMEM 维度的 size 和 stride
     auto si = basis_get(ei,  shape(gmem_layout));
     auto di = basis_get(ei, stride(gmem_layout));
+
+    // Case 1: 如果这个维度的 size=1 或 stride=0，它对 TMA 没有贡献
+    // 返回 Int<0>{} 作为算术恒等元（加法单位元）
     if constexpr (is_constant<1, decltype(si)>::value || is_constant<0, decltype(di)>::value) {
       return Int<0>{};                  // If size-1 or stride-0, return arithmetic identity -- no contribution to the TMA
     } else {
       auto tma_gmem_basis_stride = stride(tma_gbasis);
+
+      // 在 tma_gbasis.stride 中查找包含 E<i> 的 TMA 维度 j
+      // 例如：tma_gbasis.stride = (E<1>, E<0>)
+      //       如果 ei = E<0>，找到 j = 1（因为 E<0> 在 stride[1] 中）
       // Find j such that E<i> is in stride<j>(tma_gbasis)
       using EI = decltype(ei);
       [[maybe_unused]] auto j = find_if(tma_gmem_basis_stride, [&](auto tma_stride_j) { return any_of(tma_stride_j, [&](auto dj) { return dj == EI{}; }); });
+
+      // Case 2: 如果找不到（这个 GMEM 维度不在任何 TMA 维度中）
+      // 例如：batch 维度可能不参与 TMA
       if constexpr (decltype(j == rank(tma_gmem_basis_stride))::value) {
         return Int<0>{};               // If not-found, return arithmetic identity -- no contribution to the TMA
       } else
+      // Case 3: 如果在 TMA dim0 中找到（连续维度）
+      // 需要考虑 recast 比例（如 half2 → half 时，坐标需要乘 2）
       if constexpr (decltype(j == Int<0>{})::value) {
         auto scale = recast_ratio * basis_get(ei, stride(gtensor));
         return E<j>{} * scale;         // Return TMA Coord basis -- with a recast scale factor
       } else
+      // Case 4: 如果 TMA 维度 j 只对应一个 GMEM 维度
+      // scale 已知为 1
       if constexpr (decltype(rank<j>(tma_gmem_basis_stride) == Int<1>{})::value) {
         return E<j>{};                 // Return TMA Coord basis -- known scale of Int<1>{}
       } else {
+        // Case 5: TMA 维度 j 对应多个 GMEM 维度（合并情况）
+        // 需要动态计算 scale
         int32_t scale = ceil_div(int32_t(di * sizeof_bits_v<TmaInternalType> / cute::max(gmem_prob_stride[j], uint64_t{16})), 8);
         return E<j>{} * scale;         // Return TMA Coord basis -- with a dynamic scale factor
       }
     }
   });
 
-#if 0
-    print("gmem_tma_basis_stride : "); print(gmem_tma_basis_stride); print("\n");
+#if CUTE_DEBUG_TMA_GBASIS
+  print("  gmem_tma_basis_stride (src: transform_leaf(gbasis, ...)) : "); print(gmem_tma_basis_stride); print("\n");
+  print("[make_tma_copy_desc] end\n");
 #endif
 
+  // ========================================================================
+  // 第五部分：打包返回值
+  // ========================================================================
+  // 返回 tuple<TmaDescriptor, AuxParams>
+  // - TmaDescriptor: 128 字节的 TMA 配置，传给 cp.async.bulk.tensor 指令
+  // - AuxParams: 包含 gmem_tma_basis_stride，用于运行时计算 TMA 坐标偏移
   using AuxParams = AuxTmaParams<decltype(gmem_tma_basis_stride),
                                  decltype(tma_gbasis),
                                  decltype(swizzle)>;
@@ -1132,7 +1460,21 @@ make_tma_copy_atom(CopyOp,
   auto smem_swizzle = get_swizzle_portion(slayout);
   auto smem_layout  = get_nonswizzle_portion(slayout);
 
+#if CUTE_DEBUG_TMA_GBASIS
+  print("\n[make_tma_copy_atom] begin\n");
+  print("  gtensor (src: input gtensor) : "); print(gtensor); print("\n");
+  print("  slayout (src: input slayout) : "); print(slayout); print("\n");
+  print("  cta_v_map (src: input cta_v_map) : "); print(cta_v_map); print("\n");
+  print("  num_multicast (src: input num_multicast) : "); print(num_multicast); print("\n");
+  print("  smem_swizzle (src: get_swizzle_portion(slayout)) : "); print(smem_swizzle); print("\n");
+  print("  smem_layout (src: get_nonswizzle_portion(slayout)) : "); print(smem_layout); print("\n");
+  print("  call chain: make_tma_copy_atom -> construct_tma_gbasis -> make_tma_copy_desc\n");
+#endif
+
   auto tma_gbasis = detail::construct_tma_gbasis<TmaInternalType>(gtensor, smem_layout, cta_v_map);
+#if CUTE_DEBUG_TMA_GBASIS
+  print("  tma_gbasis (src: construct_tma_gbasis(...)) : "); print(tma_gbasis); print("\n");
+#endif
 
   //
   // Construct the TMA Desc and the strides of the TMA Tensor
@@ -1142,6 +1484,9 @@ make_tma_copy_atom(CopyOp,
                                                                             tma_gbasis,
                                                                             smem_swizzle,
                                                                             num_multicast);
+#if CUTE_DEBUG_TMA_GBASIS
+  print("  tma_desc created (src: make_tma_copy_desc(...).first)\n");
+#endif
 
   //
   // Construct the Copy_Traits
@@ -1150,6 +1495,10 @@ make_tma_copy_atom(CopyOp,
   constexpr int num_bits_per_tma = size(tma_gbasis) * sizeof_bits_v<TmaInternalType>;
   using Traits = Copy_Traits<CopyOp, cute::C<num_bits_per_tma>, decltype(aux_params)>;
   using Atom   = Copy_Atom<Traits, typename GEngine::value_type>;
+#if CUTE_DEBUG_TMA_GBASIS
+  print("  num_bits_per_tma (src: size(tma_gbasis) * sizeof_bits_v<TmaInternalType>) : ");
+  print(num_bits_per_tma); print("\n");
+#endif
 
   Traits tma_traits{tma_desc, aux_params};
 
@@ -1159,6 +1508,9 @@ make_tma_copy_atom(CopyOp,
 #endif
 
   // Return the Copy_Atom
+#if CUTE_DEBUG_TMA_GBASIS
+  print("[make_tma_copy_atom] end\n");
+#endif
   return Atom{tma_traits};
 }
 
@@ -1371,9 +1723,25 @@ make_tma_atom(CopyOp                  const& copy_op,
   auto cta_v_tile = make_identity_layout(shape(gtensor)).compose(cta_tiler);
   // Prefer TmaInternalType if specified. Fallback to GEngine::value_type
   using TmaType = conditional_t<is_same<void, TmaInternalType>::value, typename GEngine::value_type, TmaInternalType>;
-  return detail::make_tma_copy_atom<TmaType>(copy_op,
-                                             gtensor, slayout,
-                                             size(cluster_size), cta_v_tile);
+#if CUTE_DEBUG_TMA_GBASIS
+  print("\n[make_tma_atom] begin\n");
+  print("  gtensor (src: input gtensor) : "); print(gtensor); print("\n");
+  print("  slayout (src: input slayout) : "); print(slayout); print("\n");
+  print("  cta_tiler (src: input cta_tiler) : "); print(cta_tiler); print("\n");
+  print("  cluster_size (src: input cluster_size) : "); print(cluster_size); print("\n");
+  print("  cta_v_tile (src: make_identity_layout(shape(gtensor)).compose(cta_tiler)) : "); print(cta_v_tile); print("\n");
+  print("  TmaType.bits (src: sizeof_bits<TmaType>::value) : "); print(sizeof_bits<TmaType>::value); print("\n");
+  print("  TmaType.from_default (src: is_same<void, TmaInternalType>) : "); print(int(is_same<void, TmaInternalType>::value)); print("\n");
+  print("  call chain: make_tma_atom -> make_tma_copy_atom -> construct_tma_gbasis -> make_tma_copy_desc\n");
+#endif
+
+  auto atom = detail::make_tma_copy_atom<TmaType>(copy_op,
+                                                  gtensor, slayout,
+                                                  size(cluster_size), cta_v_tile);
+#if CUTE_DEBUG_TMA_GBASIS
+  print("[make_tma_atom] end\n");
+#endif
+  return atom;
 }
 
 // The "VectorCopy Partitioner" for TMA
@@ -1392,14 +1760,45 @@ tma_partition(Copy_Atom<Args...>      const& copy_atom,
 {
   CUTE_STATIC_ASSERT_V(size<0>(stensor) == size<0>(gtensor));
 
+#if CUTE_DEBUG_TMA_GBASIS && defined(__CUDA_ARCH__)
+  bool do_print = (blockIdx.x == 0 && blockIdx.y == 0 && blockIdx.z == 0 &&
+                   threadIdx.x == 0 && threadIdx.y == 0 && threadIdx.z == 0);
+  if (do_print) {
+    print("\n[tma_partition] begin\n");
+    print("  copy_atom (src: input copy_atom) : "); print(copy_atom); print("\n");
+    print("  cta_coord (src: input cta_coord) : "); print(cta_coord); print("\n");
+    print("  cta_layout (src: input cta_layout) : "); print(cta_layout); print("\n");
+    print("  stensor (src: input stensor) : "); print(stensor); print("\n");
+    print("  gtensor (src: input gtensor) : "); print(gtensor); print("\n");
+  }
+#endif
+
   // Invert the smem to get the largest contiguous vector in the smem layout
   Layout inv_smem_layout = right_inverse(get_nonswizzle_portion(layout<0>(stensor)));
   // Scale that up to cover all of the smem_coords
   Layout layout_v = tile_to_shape(make_layout(inv_smem_layout), size<0>(stensor));
 
+#if CUTE_DEBUG_TMA_GBASIS && defined(__CUDA_ARCH__)
+  if (do_print) {
+    print("  inv_smem_layout (src: right_inverse(get_nonswizzle_portion(layout<0>(stensor)))) : ");
+    print(inv_smem_layout); print("\n");
+    print("  layout_v (src: tile_to_shape(make_layout(inv_smem_layout), size<0>(stensor))) : ");
+    print(layout_v); print("\n");
+  }
+#endif
+
   // Factor out the single-instrucion portion
   Layout tma_layout_v = make_layout(Int<Copy_Atom<Args...>::NumValSrc>{});
   auto layout_V = make_tile(logical_divide(layout_v, tma_layout_v));
+
+#if CUTE_DEBUG_TMA_GBASIS && defined(__CUDA_ARCH__)
+  if (do_print) {
+    print("  tma_layout_v (src: make_layout(Int<Copy_Atom<Args...>::NumValSrc>{})) : ");
+    print(tma_layout_v); print("\n");
+    print("  layout_V (src: make_tile(logical_divide(layout_v, tma_layout_v))) : ");
+    print(layout_V); print("\n");
+  }
+#endif
 
   // Append with _ until we cover all Rest... modes
   auto glayout_V = append<GLayout::rank>(layout_V, _);
@@ -1407,14 +1806,45 @@ tma_partition(Copy_Atom<Args...>      const& copy_atom,
   // Transform tile mode and coalesce
   Tensor gtensor_v = coalesce(gtensor.compose(glayout_V), Shape<Shape<_1,_1>>{});    // ((TMA,TMA_Iter), Rest...)
   Tensor stensor_v = coalesce(stensor.compose(slayout_V), Shape<Shape<_1,_1>>{});    // ((TMA,TMA_Iter), Rest...)
+
+#if CUTE_DEBUG_TMA_GBASIS && defined(__CUDA_ARCH__)
+  if (do_print) {
+    print("  glayout_V (src: append<GLayout::rank>(layout_V, _)) : "); print(glayout_V); print("\n");
+    print("  slayout_V (src: append<SLayout::rank>(layout_V, _)) : "); print(slayout_V); print("\n");
+    print("  gtensor_v (src: coalesce(gtensor.compose(glayout_V), Shape<Shape<_1,_1>>{})) : ");
+    print(gtensor_v); print("\n");
+    print("  stensor_v (src: coalesce(stensor.compose(slayout_V), Shape<Shape<_1,_1>>{})) : ");
+    print(stensor_v); print("\n");
+  }
+#endif
+
   // Offset inside the TMA-mode for the multicast
   auto multicast_offset = cta_layout(cta_coord) * (size(tma_layout_v) / cosize(cta_layout));
   auto multicast_coord  = make_coord(make_coord(multicast_offset, Int<0>{}));
   auto gcoord = append<GLayout::rank>(multicast_coord, Int<0>{});
   auto scoord = append<SLayout::rank>(multicast_coord, Int<0>{});
 
+#if CUTE_DEBUG_TMA_GBASIS && defined(__CUDA_ARCH__)
+  if (do_print) {
+    print("  multicast_offset (src: cta_layout(cta_coord) * (size(tma_layout_v) / cosize(cta_layout))) : ");
+    print(multicast_offset); print("\n");
+    print("  multicast_coord (src: make_coord(make_coord(multicast_offset, Int<0>{}))) : ");
+    print(multicast_coord); print("\n");
+    print("  gcoord (src: append<GLayout::rank>(multicast_coord, Int<0>{})) : "); print(gcoord); print("\n");
+    print("  scoord (src: append<SLayout::rank>(multicast_coord, Int<0>{})) : "); print(scoord); print("\n");
+  }
+#endif
+
   Tensor gresult = domain_offset(gcoord, gtensor_v);
   Tensor sresult = domain_offset(scoord, stensor_v);
+
+#if CUTE_DEBUG_TMA_GBASIS && defined(__CUDA_ARCH__)
+  if (do_print) {
+    print("  gresult (src: domain_offset(gcoord, gtensor_v)) : "); print(gresult); print("\n");
+    print("  sresult (src: domain_offset(scoord, stensor_v)) : "); print(sresult); print("\n");
+    print("[tma_partition] end\n");
+  }
+#endif
 
   return cute::make_tuple(gresult, sresult);
 }

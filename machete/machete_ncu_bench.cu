@@ -181,8 +181,6 @@ struct Options {
 #if defined(CUTLASS_ARCH_MMA_SM90_SUPPORTED)
 
 void initialize(Options const& options) {
-  uint64_t seed = 2024;
-
   auto shape_B = cute::make_shape(options.n, options.k, 1);
   int const scale_k = cutlass::ceil_div(options.k, options.g);
 
@@ -192,27 +190,22 @@ void initialize(Options const& options) {
   stride_D = cutlass::make_cute_packed_stride(StrideD{}, cute::make_shape(options.n, options.m, 1));
   stride_S = cutlass::make_cute_packed_stride(StrideS{}, cute::make_shape(options.n, scale_k, 1));
 
-  auto layout_B = make_layout(shape_B, stride_B);
-
-  // Allocate memory
+  // Allocate memory and zero-initialize (no GPU kernels, just cudaMemset)
   block_A.reset(options.m * options.k);
   block_B.reset(options.k * options.n);
   block_scale.reset(scale_k * options.n);
   block_C.reset(options.m * options.n);
   block_D.reset(options.m * options.n);
 
-  // Initialize with random data
-  initialize_tensor(block_A, seed + 1);
-  initialize_tensor(block_B, seed + 2);
+  // Zero-initialize all buffers (cudaMemset is not a kernel, won't appear in NCU)
+  cudaMemset(block_A.get(), 0, options.m * options.k * sizeof(ElementA));
+  cudaMemset(block_B.get(), 0, (options.k * options.n * sizeof(ElementB) + 1) / 2);  // INT4 packed
+  cudaMemset(block_scale.get(), 0, scale_k * options.n * sizeof(ElementScale));
+  cudaMemset(block_C.get(), 0, options.m * options.n * sizeof(ElementC));
+  cudaMemset(block_D.get(), 0, options.m * options.n * sizeof(ElementD));
 
-  // Initialize scales to 1.0 for simplicity
-  std::vector<ElementScale> host_scale(scale_k * options.n);
-  for (auto& s : host_scale) s = ElementScale(1.0f);
-  cudaMemcpy(block_scale.get(), host_scale.data(), host_scale.size() * sizeof(ElementScale), cudaMemcpyHostToDevice);
-
-  // Shuffle B for efficient loads
+  // Set layout for reordered B (no actual reordering, just set the layout metadata)
   layout_B_reordered = cute::tile_to_shape(LayoutAtomQuant{}, shape_B);
-  cutlass::reorder_tensor(block_B.get(), layout_B, layout_B_reordered);
 }
 
 int run_gemm(Options &options) {

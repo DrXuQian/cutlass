@@ -1,0 +1,51 @@
+# Makefile for TRT-LLM MoE Grouped GEMM Benchmark
+# This builds the standalone TRT-LLM kernel extraction
+
+CUTLASS_PATH = ..
+CUDA_PATH ?= /usr/local/cuda
+
+NVCC = $(CUDA_PATH)/bin/nvcc
+CXX = g++
+
+# CUDA architecture for Hopper
+ARCH = sm_90a
+
+# Include paths
+INCLUDES = -I$(CUTLASS_PATH)/include \
+           -I$(CUTLASS_PATH)/tools/util/include \
+           -I$(CUDA_PATH)/include
+
+# NVCC flags
+NVCC_FLAGS = -std=c++17 \
+             -arch=$(ARCH) \
+             --expt-relaxed-constexpr \
+             -O3 \
+             -DCOMPILE_HOPPER_TMA_GROUPED_GEMMS \
+             -DCUTLASS_ENABLE_TENSOR_CORE_MMA=1 \
+             -DNDEBUG \
+             $(INCLUDES)
+
+# Linker flags
+LDFLAGS = -lcuda -lcudart
+
+# Targets
+TARGET = moe_gemm_trtllm_bench
+
+.PHONY: all clean
+
+all: $(TARGET)
+
+$(TARGET): moe_gemm_trtllm_bench.cu moe_gemm_trtllm.cuh
+	$(NVCC) $(NVCC_FLAGS) -o $@ $< $(LDFLAGS)
+
+clean:
+	rm -f $(TARGET)
+
+run: $(TARGET)
+	./$(TARGET)
+
+bench: $(TARGET)
+	./$(TARGET) --num_experts=8 --tokens=128 --hidden=4096 --inter=11008 --warmup=10 --iterations=100
+
+bench_large: $(TARGET)
+	./$(TARGET) --num_experts=8 --tokens=512 --hidden=4096 --inter=14336 --warmup=10 --iterations=50

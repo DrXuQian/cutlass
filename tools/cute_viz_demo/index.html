@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>CuTe Visualizer Demo (tiledMMA registers)</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="title">CuTe Visualizer Demo</div>
+      <div class="subtitle">
+        Focus: <code>sgemm_sm80</code> — <code>TiledMMA</code> register fragments only (<code>A</code>, <code>B</code>, <code>C</code>)
+      </div>
+    </header>
+
+    <section class="controls">
+      <label class="thread">
+        <span>Thread</span>
+        <input id="threadSlider" type="range" min="0" max="127" value="0" />
+        <input id="threadNumber" type="number" min="0" max="127" value="0" />
+      </label>
+      <div id="threadInfo" class="threadInfo"></div>
+
+      <label class="iter">
+        <span>Iter</span>
+        <input id="iterSlider" type="range" min="0" max="0" value="0" />
+        <input id="iterNumber" type="number" min="0" max="0" value="0" />
+      </label>
+      <div id="iterInfo" class="threadInfo"></div>
+
+      <div class="spacer"></div>
+
+      <button id="btnBundled" type="button">Reload sample</button>
+      <button id="btnMock" type="button">Use mock</button>
+
+      <details class="advanced">
+        <summary>Advanced</summary>
+        <label class="file">
+          <span>Load JSON</span>
+          <input id="fileInput" type="file" accept="application/json" />
+        </label>
+      </details>
+    </section>
+
+    <main class="layout">
+      <section class="panel">
+        <h2>REG A <span class="hint">(mma_m, cp) → (m, k)</span></h2>
+        <div id="regAMeta" class="meta"></div>
+        <div id="regAGrid" class="gridWrap"></div>
+      </section>
+
+      <section class="panel">
+        <h2>REG B <span class="hint">(mma_n, cp) → (n, k)</span></h2>
+        <div id="regBMeta" class="meta"></div>
+        <div id="regBGrid" class="gridWrap"></div>
+      </section>
+
+      <section class="panel">
+        <h2>REG C <span class="hint">(v, mma_m, mma_n) → (m, n)</span></h2>
+        <div id="regCMeta" class="meta"></div>
+        <div id="regCGrid"></div>
+      </section>
+
+      <section class="panel inspector">
+        <h2>Inspector</h2>
+        <pre id="inspector"></pre>
+      </section>
+    </main>
+
+    <footer class="footer">
+      <div>
+        Generate JSON from <code>examples/cute/tutorial/sgemm_sm80.cu</code>:
+        <code>./sgemm_sm80_dump --dump-json --dump-k 256 &gt; ldmatrix.json</code>
+      </div>
+      <div class="small">
+        Serve the repo with <code>python3 -m http.server</code> so the page can fetch <code>ldmatrix.json</code>.
+      </div>
+    </footer>
+
+    <script src="app.js"></script>
+  </body>
+</html>

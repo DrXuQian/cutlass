@@ -1,0 +1,145 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>GEMM Decomposition Visualizer</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="title">GEMM Decomposition Visualizer</div>
+    <div class="subtitle">
+      Visualize: CTA Scheduler → G2S → S2R → MMA → R2S
+    </div>
+  </header>
+
+  <section class="controls">
+    <div class="control-group">
+      <label>
+        <span>Phase</span>
+        <select id="phaseSelect">
+          <option value="cta">1. CTA Scheduler</option>
+          <option value="g2s">2. G2S (gmem → smem)</option>
+          <option value="s2r">3. S2R (smem → reg)</option>
+          <option value="mma">4. MMA (compute)</option>
+          <option value="r2s">5. R2S (reg → smem for C)</option>
+        </select>
+      </label>
+    </div>
+
+    <div class="control-group">
+      <label>
+        <span>Stage</span>
+        <input id="stageSlider" type="range" min="0" max="0" value="0">
+        <input id="stageNumber" type="number" min="0" max="0" value="0">
+      </label>
+      <div id="stageInfo" class="info-text"></div>
+    </div>
+
+    <div class="control-group">
+      <label>
+        <span>Thread</span>
+        <input id="threadSlider" type="range" min="0" max="127" value="0">
+        <input id="threadNumber" type="number" min="0" max="127" value="0">
+      </label>
+      <div id="threadInfo" class="info-text"></div>
+    </div>
+
+    <div class="control-group playback">
+      <button id="btnPrev">◀ Prev</button>
+      <button id="btnPlay">▶ Play</button>
+      <button id="btnNext">Next ▶</button>
+      <label>
+        <span>Speed</span>
+        <input id="speedSlider" type="range" min="100" max="2000" value="500">
+      </label>
+    </div>
+
+    <div class="control-group">
+      <button id="btnLoadSample">Load Sample</button>
+      <label class="file-label">
+        <span>Load JSON</span>
+        <input id="fileInput" type="file" accept=".json">
+      </label>
+    </div>
+  </section>
+
+  <main class="main-layout">
+    <!-- Left: Global Memory Views -->
+    <section class="panel gmem-panel">
+      <h2>Global Memory</h2>
+      <div class="gmem-container">
+        <div class="gmem-section">
+          <h3>Matrix A <span id="gAShape"></span></h3>
+          <div id="gAGrid" class="matrix-grid"></div>
+        </div>
+        <div class="gmem-section">
+          <h3>Matrix B <span id="gBShape"></span></h3>
+          <div id="gBGrid" class="matrix-grid"></div>
+        </div>
+        <div class="gmem-section">
+          <h3>Matrix C <span id="gCShape"></span></h3>
+          <div id="gCGrid" class="matrix-grid"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Middle: Shared Memory Views -->
+    <section class="panel smem-panel">
+      <h2>Shared Memory (CTA Tile)</h2>
+      <div class="smem-container">
+        <div class="smem-section">
+          <h3>sA <span id="sAShape"></span></h3>
+          <div id="sAGrid" class="matrix-grid"></div>
+        </div>
+        <div class="smem-section">
+          <h3>sB <span id="sBShape"></span></h3>
+          <div id="sBGrid" class="matrix-grid"></div>
+        </div>
+      </div>
+      <div id="smemBankView" class="bank-view">
+        <h3>SMEM Bank View (32 banks)</h3>
+        <div id="bankGrid" class="bank-grid"></div>
+      </div>
+    </section>
+
+    <!-- Right: Register Views -->
+    <section class="panel reg-panel">
+      <h2>Registers (per thread)</h2>
+      <div class="reg-container">
+        <div class="reg-section">
+          <h3>REG A <span id="regAShape"></span></h3>
+          <div id="regAGrid" class="matrix-grid"></div>
+        </div>
+        <div class="reg-section">
+          <h3>REG B <span id="regBShape"></span></h3>
+          <div id="regBGrid" class="matrix-grid"></div>
+        </div>
+        <div class="reg-section">
+          <h3>REG C (Accumulator) <span id="regCShape"></span></h3>
+          <div id="regCGrid" class="matrix-grid"></div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <section class="inspector-panel">
+    <h2>Inspector</h2>
+    <pre id="inspector"></pre>
+  </section>
+
+  <section class="timeline-panel">
+    <h2>Pipeline Timeline</h2>
+    <div id="timeline" class="timeline"></div>
+  </section>
+
+  <footer class="footer">
+    <div>
+      Generate JSON: <code>./sgemm_sm80 --dump-json --dump-m 128 --dump-n 128 --dump-k 64 > gemm_data.json</code>
+    </div>
+  </footer>
+
+  <script src="app.js"></script>
+</body>
+</html>

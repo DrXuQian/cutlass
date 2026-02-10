@@ -1,5 +1,40 @@
 {
     "files.associations": {
-        "type_traits": "cpp"
-    }
+        "*.cuh": "cuda-cpp",
+        "*.cu": "cuda-cpp",
+        "*.hpp": "cpp",
+        "type_traits": "cpp",
+        "functional": "cpp",
+        "tuple": "cpp",
+        "utility": "cpp"
+    },
+    "C_Cpp.default.includePath": [
+        "${workspaceFolder}/include/**",
+        "${workspaceFolder}/tools/util/include/**",
+        "/usr/local/cuda-12.8/include/**"
+    ],
+    "C_Cpp.default.defines": [
+        "__CUDACC__",
+        "__CUDA_ARCH__=900",
+        "CUTE_ARCH_MMA_SM90_ENABLED",
+        "CUTE_ARCH_MMA_SM90A_ENABLED",
+        "CUTE_ARCH_TMA_SM90_ENABLED"
+    ],
+    "C_Cpp.intelliSenseEngine": "default",
+    "C_Cpp.intelliSenseEngineFallback": "enabled",
+    "C_Cpp.errorSquiggles": "disabled",
+    "C_Cpp.autocompleteAddParentheses": true,
+    "C_Cpp.default.cppStandard": "c++17",
+    "C_Cpp.default.compilerPath": "/usr/local/cuda-12.8/bin/nvcc",
+    "search.exclude": {
+        "**/build": true,
+        "**/.cache": true
+    },
+    "cmake.configureOnOpen": false,
+    "cmake.automaticReconfigure": false,
+    "C_Cpp.dimInactiveRegions": false,
+    "workbench.colorCustomizations": {
+        "editorUnnecessaryCode.opacity": "#000000FF"
+    },
+    "workbench.editor.enablePreview": false
 }

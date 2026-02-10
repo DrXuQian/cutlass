@@ -3,13 +3,51 @@
         {
             "name": "Linux",
             "includePath": [
-                "${workspaceFolder}/**"
+                "${workspaceFolder}/include/**",
+                "${workspaceFolder}/tools/util/include/**",
+                "/usr/local/cuda-12.8/include/**"
             ],
-            "defines": [],
-            "compilerPath": "/usr/bin/gcc",
+            "defines": [
+                "__CUDACC__",
+                "__CUDA_ARCH__=900",
+                "__CUDA_ARCH_SPECIFIC__=900",
+                "__CUDA_ARCH_FEAT_SM90_ALL",
+                "__CUDA_ARCH_LIST__=900",
+                "NDEBUG",
+                "ENABLE_SM90_KERNEL_LEVEL=1",
+                "CUDA_ARCH_CONDITIONAL(x)=true",
+                "CUDA_ARCH_FAMILY(x)=true",
+                "CUDA_ARCH_CONDITIONAL_OR_FAMILY(x)=true",
+                "CUTLASS_ENABLE_TENSOR_CORE_MMA=1",
+                "CUTE_ARCH_CLUSTER_SM90_ENABLED",
+                "CUTE_ARCH_CP_ASYNC_SM80_ENABLED",
+                "CUTE_ARCH_DEVICE_MODIFIABLE_TMA_SM90_ENABLED",
+                "CUTE_ARCH_ELECT_ONE_SM90_ENABLED",
+                "CUTE_ARCH_LDSM_SM75_ENABLED",
+                "CUTE_ARCH_LDSM_SM75_ACTIVATED",
+                "CUTE_ARCH_LDSM_SM75_SUPPORTED",
+                "CUTE_ARCH_MMA_F64_SM90_ENABLED",
+                "CUTE_ARCH_MMA_SM70_ENABLED",
+                "CUTE_ARCH_MMA_SM75_ENABLED",
+                "CUTE_ARCH_MMA_SM80_ENABLED",
+                "CUTE_ARCH_MMA_SM90A_ENABLED",
+                "CUTE_ARCH_STSM_SM90_ENABLED",
+                "CUTE_ARCH_TMA_SM90_ENABLED",
+                "CUTE_ARCH_WARP_SHUFFLE_ENABLED"
+            ],
+            "compilerPath": "/usr/local/cuda-12.8/bin/nvcc",
             "cStandard": "c17",
-            "cppStandard": "gnu++17",
-            "intelliSenseMode": "linux-gcc-x64"
+            "cppStandard": "c++17",
+            "intelliSenseMode": "linux-gcc-x64",
+            "browse": {
+                "path": [
+                    "${workspaceFolder}/include",
+                    "${workspaceFolder}/tools/util/include",
+                    "/usr/local/cuda-12.8/include"
+                ],
+                "limitSymbolsToIncludedHeaders": false,
+                "databaseFilename": "${workspaceFolder}/.vscode/browse.vc.db"
+            }
         }
     ],
     "version": 4
